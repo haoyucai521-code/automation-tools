@@ -1,0 +1,17 @@
+app:
+  workspace: ..
+  runs_dir: runs
+  default_timeout_s: 120
+  log_level: INFO
+
+serial:
+  port: TODO_CONFIRM
+  baudrate: 115200
+  bytesize: 8
+  parity: N
+  stopbits: 1
+  rtscts: false
+  dsrdtr: false
+  read_timeout_s: 0.1
+  write_timeout_s: 1
+  encoding: utf-8

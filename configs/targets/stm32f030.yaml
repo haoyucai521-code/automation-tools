@@ -1,0 +1,48 @@
+# 模板不能直接用于硬件。按 docs/HARDWARE_SETUP.md 逐项实测后修改。
+target:
+  id: stm32f030
+  family: STM32
+  exact_part_number: TODO_CONFIRM
+  status: template
+build:
+  backend: gcc
+  cwd: TODO_PROJECT_DIRECTORY
+  command: [TODO_BUILD_EXECUTABLE, TODO_BUILD_ARGUMENT]
+  executable: TODO_IARBUILD
+  project_file: TODO_PROJECT.ewp
+  configuration: Release
+  artifact: build/firmware.bin
+  artifact_format: bin
+  timeout_s: 60
+flash:
+  backend: stm32cubeprogrammer_cli
+  executable: STM32_Programmer_CLI.exe
+  interface: SWD
+  mode: NORMAL
+  reset_mode: SWrst
+  address: TODO_CONFIRM_FROM_LINKER_CONFIG
+  region_start: TODO_CONFIRM_ALLOWED_REGION
+  region_size: TODO_CONFIRM_BYTES
+  address_source: TODO_LINKER_CONFIG_AND_REVISION
+  verify: true
+  timeout_s: 60
+  cli_verified: false
+  compatibility_verified: false
+  connect_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
+  write_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
+  verify_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
+reset:
+  backend: ch340_rts
+  control_line: RTS
+  asserted_rts_value: TODO_MEASURE
+  pulse_ms: 100
+  release_delay_ms: TODO_MEASURE
+  polarity_verified: false
+  voltage_verified: false
+  wiring_verified: false
+  open_transient_verified: false
+  timing_verified: false
+startup:
+  ready_pattern: null
+  timeout_s: 5
+  settle_delay_s: 1

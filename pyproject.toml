@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embedded-auto"
+version = "0.1.0"
+description = "可审计的本地嵌入式构建、烧录与协议测试工具"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0,<7", "pyserial>=3.5,<4"]
+
+[project.scripts]
+embedded-auto = "embedded_auto.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

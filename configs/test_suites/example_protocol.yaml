@@ -1,0 +1,8 @@
+# 仅演示格式，需根据真实固件协议修改，不能视为已验证用例。
+version: 1
+tests:
+  - name: ping
+    send_text: "PING\r\n"
+    timeout_s: 2
+    expect:
+      contains_text: PONG
