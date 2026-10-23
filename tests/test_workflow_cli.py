@@ -29,9 +29,10 @@ def config_for(root):
         "build": {"backend": "gcc", "cwd": str(root), "artifact": str(root / "source.bin"),
                   "command": [sys.executable, "-c", "from pathlib import Path; Path('source.bin').write_bytes(b'firmware')"], "timeout_s": 3},
         "flash": {"executable": sys.executable, "interface": "SWD", "mode": "NORMAL", "reset_mode": "SWrst",
-                  "address": 4096, "region_start": 4096, "region_size": 1024, "address_source": "fake-layout-v1",
+                  "address": 0x08000000, "region_start": 0x08000000, "region_size": 1024, "address_source": "fake-layout-v1",
                   "verify": True, "timeout_s": 3, "cli_verified": True, "compatibility_verified": True,
-                  "connect_success_pattern": "CONNECTED", "write_success_pattern": "WRITTEN", "verify_success_pattern": "VERIFIED"},
+                  "connect_success_pattern": "CONNECTED", "erase_success_pattern": "ERASED",
+                  "write_success_pattern": "WRITTEN", "verify_success_pattern": "VERIFIED"},
         "reset": {"asserted_rts_value": True, "pulse_ms": 1, "release_delay_ms": 1,
                   "polarity_verified": True, "voltage_verified": True, "wiring_verified": True,
                   "open_transient_verified": True, "timing_verified": True},
@@ -93,6 +94,9 @@ class MemorySerial:
 
 
 class PythonProgrammer:
+    def erase_command(self, config):
+        return [sys.executable, "-c", "print('CONNECTED ERASED')"]
+
     def command(self, config, image=None):
         return [sys.executable, "-c", "print('CONNECTED WRITTEN VERIFIED')"]
 
@@ -129,6 +133,7 @@ class WorkflowTests(unittest.TestCase):
         events = [json.loads(line)["state"] for line in (path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertLess(events.index("BUILD"), events.index("OPEN_SERIAL"))
         self.assertLess(events.index("OPEN_SERIAL"), events.index("RELEASE_RESET_AT_CONFIGURED_TIME"))
+        self.assertLess(events.index("FLASH_ERASE_SUCCEEDED"), events.index("WRITE_FLASH"))
         self.assertLess(events.index("CLEANUP"), len(events) - 1)
         self.assertEqual(events[-1], "ARCHIVE")
 
@@ -219,6 +224,9 @@ class ConfigAndCLITests(unittest.TestCase):
             self.assertTrue(result.data["ready_for_execution"])
             self.assertEqual(result.data["commands"]["build"], config["build"]["command"])
             self.assertIn("-v", result.data["commands"]["programmer"])
+            self.assertEqual(result.data["commands"]["erase"][-2:], ["-e", "all"])
+            self.assertIn("KV", result.data["destructive_warning"])
+            self.assertLess(result.data["steps"].index("ERASE_FLASH"), result.data["steps"].index("WAIT_FLASH_AND_VERIFY"))
             invalid = WorkflowEngine.plan(config, "run", {"tests": []})
             self.assertFalse(invalid.data["ready_for_execution"])
 
@@ -243,9 +251,30 @@ class ConfigAndCLITests(unittest.TestCase):
         for target in ("stm32f030", "stm32f070", "apm32e030"):
             config = load_config("configs/app.yaml", target)
             self.assertEqual(config["target"]["status"], "template")
+            self.assertEqual(int(config["flash"]["address"], 0), 0x08000000)
+            self.assertIn("erase_success_pattern", config["flash"])
             for operation in ("run", "connect", "reset", "monitor"):
                 with self.assertRaises(ToolError):
                     validate_config(config, operation)
+
+    def test_stm32_and_apm32_require_uniform_base_address(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for family in ("STM32", "APM32"):
+                config = config_for(Path(directory))
+                config["target"]["family"] = family
+                validate_config(config, "run")
+                config["flash"]["address"] = 0x08002000
+                with self.assertRaises(ToolError) as error:
+                    validate_config(config, "run")
+                self.assertEqual(error.exception.code, "CONFIG_INVALID")
+
+    def test_connect_dry_run_has_no_erase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = WorkflowEngine.plan(config_for(Path(directory)), "connect")
+            self.assertNotIn("erase", result.data["commands"])
+            self.assertNotIn("ERASE_FLASH", result.data["steps"])
+            self.assertNotIn("-e", result.data["commands"]["programmer"])
+            self.assertIsNone(result.data["destructive_warning"])
 
     def test_common_options_before_or_after_subcommand(self):
         for argv in (("--json", "--target", "fake", "build"), ("build", "--target", "fake", "--json"),

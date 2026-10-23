@@ -6,8 +6,8 @@
 | --- | --- | --- |
 | `device check` | 枚举工具/串口，报告配置问题；不打开端口 | 无 |
 | `build` | 构建并保存可审计 BIN 快照和 manifest | `--backend iar/gcc`（可选） |
-| `connect` | 仅做复位辅助连接实验，不写入 | 无 |
-| `flash` | 烧录已构建快照，严格校验清单 | `--artifact` 必须；`--manifest` 可选 |
+| `connect` | 仅做复位辅助连接实验，不擦除、不写入 | 无 |
+| `flash` | 校验清单后，全片擦除、写入已构建快照并校验 | `--artifact` 必须；`--manifest` 可选 |
 | `reset` | 普通脉冲复位 | 无 |
 | `monitor` | 定时采集 RX/TX 证据 | `--duration` 默认 30 秒 |
 | `test` | 对当前固件运行确定性协议套件 | `--suite` 必须 |
@@ -41,7 +41,23 @@ IAR 示例：`backend: iar`、`executable: <IarBuild.exe完整路径>`、`projec
 embedded-auto flash --target stm32f030 --artifact "runs/<build_run_id>/firmware.bin" --json
 ```
 
-默认同目录读取 `artifact_manifest.json`。不提供忽略哈希、忽略校验或直接烧录任意裸 BIN 的绕过选项；清单不构成来源签名。真实烧录要求 `status: verified`、`cli_verified/compatibility_verified/timing_verified: true`。地址不会按型号自动填充，`region_size` 单位为字节。没有自动解析 linker；`address_source` 必须记录人工核验的来源/版本。
+默认同目录读取 `artifact_manifest.json`。不提供忽略哈希、忽略校验或直接烧录任意裸 BIN 的绕过选项；清单不构成来源签名。真实烧录要求 `status: verified`、`cli_verified/compatibility_verified/timing_verified: true`。按用户确认，当前 STM32/APM32 平台统一使用 `address: "0x08000000"`；配置和烧录适配器拒绝其他起点。固件 linker 起点仍必须匹配，`region_size` 单位为字节，容量须按具体板卡填写。
+
+### 全片擦除流程（2026-10-23 新增）
+
+`flash` 和 `run` 在写入前必做一次全片擦除，无跳过选项：
+
+```text
+CLI -c port=SWD mode=NORMAL reset=SWrst -e all
+  ↓ 退出码 0，且匹配连接和擦除成功标志
+CLI -c port=SWD mode=NORMAL reset=SWrst -w firmware.bin 0x08000000 -v
+```
+
+两个阶段各自执行外部 RTS 辅助连接，沿用实测释放时序；串口会话和日志采集持续保持。先校验全部产物身份、区域和成功正则，再允许擦除。擦除失败、不匹配成功标志或被取消时不启动写入；写入/校验失败时不进入协议测试。
+
+目标配置新增必需的 `flash.erase_success_pattern`，应取自本机真实 `-e all` 输出，而不是使用总能匹配的宽泛正则。擦除证据保留在 `erase.log` 和 `flash_result.json` 的 `data.erase`；`--dry-run` 显示擦除命令、执行顺序和破坏性警告，不执行任何硬件动作。
+
+**全片擦除会清除整个内部 Flash，包括 Bootloader、KV、校准/配对等参数，即使它们不在 BIN 覆盖范围内。** 正式流程不自动备份/恢复；执行前按需保存。本次增加的是软件流程，先前单次实机报告没有执行过全片擦除，不能作为新擦除步骤的硬件验收。
 
 ## 复位与启动
 

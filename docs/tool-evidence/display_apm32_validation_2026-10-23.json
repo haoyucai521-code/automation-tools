@@ -1,0 +1,80 @@
+{
+  "date": "2026-10-23",
+  "board": "R157H display",
+  "chip_user_confirmed": "APM32E030",
+  "cli_reported_device_name": "STM32F05x/F030x8",
+  "cli_reported_device_id": "0x440",
+  "cli_reported_flash_bytes": 65536,
+  "cli_version": "2.16.0",
+  "stlink_fw": "V2J37S7",
+  "serial": {
+    "port": "COM7",
+    "baudrate": 9600,
+    "format": "8N1"
+  },
+  "reset": {
+    "asserted_rts_value": true,
+    "released_rts_value": false,
+    "release_delay_ms": 200,
+    "pulse_ms": 100
+  },
+  "connection": {
+    "interface": "SWD",
+    "mode": "NORMAL",
+    "reset": "SWrst",
+    "frequency_khz": 4000
+  },
+  "firmware": {
+    "source_type": "user_supplied",
+    "source_path": "C:\\Users\\user\\Desktop\\app.bin",
+    "sha256": "703e4fb76b7b2a242d92902a2ea8c132b033eefcd8adcf5f4a7dc008e2c4e99d",
+    "size": 29547,
+    "build_performed": false
+  },
+  "address": "0x08000000",
+  "image_end_exclusive": "0x0800736B",
+  "backup": {
+    "path": "D:\\Chy\\automation\\runs\\20261023T065749683211Z_r157h_display_apm32_trial_31bfd724\\flash_before.bin",
+    "size": 65536,
+    "sha256": "78c6e8d453776216f7e016e79a2ccb0d1891c158e755ff915c4de682de16c8b0",
+    "returncode": 0
+  },
+  "connect_only_passed": true,
+  "write_passed": true,
+  "verify_passed": true,
+  "boot_marker_seen": true,
+  "firmware_version": "1.0.0.0",
+  "firmware_build": "Oct 23 2026 14:31:01",
+  "attempt_count": {
+    "connect_only": 1,
+    "backup": 1,
+    "write_and_verify": 1
+  },
+  "run_id": "20261023T065749683211Z_r157h_display_apm32_trial_31bfd724",
+  "run_path": "runs\\20261023T065749683211Z_r157h_display_apm32_trial_31bfd724",
+  "connect_evidence_path": "runs\\20261023T065717058523Z_r157h_display_apm32_trial_2c324e3c",
+  "serial_rx_bytes": 1025,
+  "raw_log_and_jsonl_consistent": true,
+  "cleanup": [
+    {
+      "action": "release_reset",
+      "success": true
+    },
+    {
+      "action": "close_serial",
+      "success": true
+    },
+    {
+      "action": "close_logs",
+      "success": true
+    }
+  ],
+  "limitations": [
+    "single successful write, not 20-cycle stability test",
+    "CLI device label does not independently establish vendor or exact part number",
+    "shared SWCLK capture contains non-UART bytes during programming; raw evidence retained",
+    "post-close NRST level not measured; board may be held in reset when COM7 is closed",
+    "pre/post Flash outside programmed sectors not compared",
+    "externally supplied BIN tested via calibration script and existing low-level adapters; standard flash CLI still requires build manifest"
+  ]
+}

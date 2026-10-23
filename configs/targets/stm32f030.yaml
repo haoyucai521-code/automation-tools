@@ -20,15 +20,16 @@ flash:
   interface: SWD
   mode: NORMAL
   reset_mode: SWrst
-  address: TODO_CONFIRM_FROM_LINKER_CONFIG
-  region_start: TODO_CONFIRM_ALLOWED_REGION
+  address: "0x08000000"
+  region_start: "0x08000000"
   region_size: TODO_CONFIRM_BYTES
-  address_source: TODO_LINKER_CONFIG_AND_REVISION
+  address_source: user_confirmed_platform_base_0x08000000
   verify: true
   timeout_s: 60
   cli_verified: false
   compatibility_verified: false
   connect_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
+  erase_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
   write_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
   verify_success_pattern: TODO_PATTERN_FROM_LOCAL_CLI_OUTPUT
 reset:

@@ -12,6 +12,7 @@
 | FLASH_TOOL_NOT_FOUND | 使用 CubeProgrammer 完整路径；本机默认安装目录存在但不在 PATH |
 | CONNECT_FAILED / CONNECT_TIMEOUT | 保留 CLI 输出和时间线，人工检查接线、电源与 RTS；先做 connect-only，不自动改成 Under Reset |
 | FLASH_FAILED / FLASH_VERIFY_FAILED | 停止协议测试，检查输出、工具/芯片支持、地址及布局；校验失败不得算成功 |
+| FLASH_ERASE_FAILED | 全片擦除未成功或未匹配成功标志，工具不启动写入。查看 erase.log、data.erase 和本机成功正则；若擦除已发生但后续写入未完成，板卡可能无法启动，保留备份并排查，不静默恢复/重试 |
 | RESET_CONTROL_FAILED | 报告硬件状态未知，检查 NRST；清理仍尝试释放，失败必须人工处理 |
 | SERIAL_PORT_BUSY / SERIAL_OPEN_FAILED | 关闭占用串口的其他程序，确认真实 COM；工具不强制关闭外部应用 |
 | SERIAL_READ/WRITE/CONTROL/CLOSE_FAILED | 检查断线/驱动，查看 cleanup。RX 错误不应阻止仍可用端口最后尝试释放 NRST |

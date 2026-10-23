@@ -53,12 +53,14 @@ class WorkflowEngine:
                 if operation != "connect":
                     candidate["flash"]["address"] = integer(candidate["flash"].get("address"), "flash.address")
                 commands["programmer"] = CubeProgrammer().command(candidate, None if operation == "connect" else Path("<artifact_snapshot>.bin"))
+                if operation != "connect":
+                    commands["erase"] = CubeProgrammer().erase_command(candidate)
             except ToolError as exc:
                 commands["programmer"] = {"unresolved": str(exc)}
         steps = {
             "build": ["VALIDATE_CONFIG", "BUILD", "VALIDATE_ARTIFACT"],
-            "run": ["VALIDATE_CONFIG", "BUILD", "VALIDATE_ARTIFACT", "OPEN_SERIAL", "ASSERT_RESET", "START_PROGRAMMER", "RELEASE_RESET_AT_CONFIGURED_TIME", "WAIT_FLASH_AND_VERIFY", "PULSE_RESET", "WAIT_BOOT", "RUN_TESTS"],
-            "flash": ["VALIDATE_CONFIG", "VALIDATE_ARTIFACT", "OPEN_SERIAL", "RESET_ASSISTED_FLASH", "PULSE_RESET"],
+            "run": ["VALIDATE_CONFIG", "BUILD", "VALIDATE_ARTIFACT", "OPEN_SERIAL", "ERASE_FLASH", "FLASH_ERASE_SUCCEEDED", "ASSERT_RESET", "START_PROGRAMMER", "RELEASE_RESET_AT_CONFIGURED_TIME", "WAIT_FLASH_AND_VERIFY", "PULSE_RESET", "WAIT_BOOT", "RUN_TESTS"],
+            "flash": ["VALIDATE_CONFIG", "VALIDATE_ARTIFACT", "OPEN_SERIAL", "ERASE_FLASH", "FLASH_ERASE_SUCCEEDED", "RESET_ASSISTED_FLASH", "PULSE_RESET"],
             "connect": ["VALIDATE_CONFIG", "OPEN_SERIAL", "RESET_ASSISTED_CONNECT_ONLY"],
             "reset": ["VALIDATE_CONFIG", "OPEN_SERIAL", "PULSE_RESET"],
             "monitor": ["VALIDATE_CONFIG", "OPEN_SERIAL", "CAPTURE_SERIAL"],
@@ -71,6 +73,7 @@ class WorkflowEngine:
             "build": config["build"], "flash": config["flash"],
             "reset": config["reset"], "serial": config["serial"], "suite": suite,
             "commands": commands,
+            "destructive_warning": "全片擦除将清除整个内部 Flash，包括参数、KV 和 Bootloader" if operation in ("flash", "run") else None,
             "validation_scope": "配置与套件预检；不证明工具、板卡、产物或身份清单可用",
         })
 

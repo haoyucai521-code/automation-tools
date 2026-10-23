@@ -78,9 +78,13 @@ class FakeReset:
 
 
 class FakeProgrammer:
-    def __init__(self, code):
+    def __init__(self, code, erase_code="print('CONNECTED\\nERASED')"):
         self.code = code
+        self.erase_code = erase_code
         self.images = []
+
+    def erase_command(self, config):
+        return [sys.executable, "-u", "-c", self.erase_code]
 
     def command(self, config, image=None):
         self.images.append(image)
@@ -123,6 +127,7 @@ class BuildFlashTests(unittest.TestCase):
                       "region_start": 0x08000000, "region_size": 1024,
                       "address_source": "fake linker script", "verify": True, "timeout_s": 5,
                       "connect_success_pattern": r"^CONNECTED$", "write_success_pattern": r"^WRITTEN$",
+                      "erase_success_pattern": r"^ERASED$",
                       "verify_success_pattern": r"^VERIFIED$", "cli_verified": True,
                       "compatibility_verified": True},
             "reset": {"asserted_rts_value": False, "release_delay_ms": 10, "pulse_ms": 100},
@@ -146,12 +151,13 @@ class BuildFlashTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_dict())
         return Path(result.data["artifact"]), result.data["manifest"], ctx
 
-    def flash(self, code="print('CONNECTED\\nWRITTEN\\nVERIFIED')", reset=None, connect_only=False):
+    def flash(self, code="print('CONNECTED\\nWRITTEN\\nVERIFIED')", reset=None, connect_only=False,
+              erase_code="print('CONNECTED\\nERASED')"):
         if connect_only:
             image, manifest, ctx = None, None, self.context()
         else:
             image, manifest, ctx = self.artifact()
-        programmer = FakeProgrammer(code)
+        programmer = FakeProgrammer(code, erase_code)
         reset = reset if reset is not None else FakeReset()
         result = FlashService(programmer).flash(self.config, ctx, FakeSession(), reset,
                                                 image, manifest, connect_only=connect_only)
@@ -164,6 +170,7 @@ class BuildFlashTests(unittest.TestCase):
         self.assertEqual(IARBackend().command(self.config), ["iarbuild.exe", str(self.root / "x.ewp"), "-build", "Release"])
         expected = ["cube-not-installed", "-c", "port=SWD", "mode=NORMAL", "reset=SWrst"]
         self.assertEqual(CubeProgrammer().command(self.config), expected)
+        self.assertEqual(CubeProgrammer().erase_command(self.config), expected + ["-e", "all"])
         self.assertEqual(CubeProgrammer().command(self.config, self.root / "a.bin"),
                          expected + ["-w", str(self.root / "a.bin"), "0x08000000", "-v"])
 
@@ -289,21 +296,77 @@ class BuildFlashTests(unittest.TestCase):
     def test_flash_success_events_logs_and_one_attempt(self):
         result, ctx, reset, programmer = self.flash()
         self.assertTrue(result.success, result.to_dict())
-        self.assertEqual(reset.actions, ["assert", "release", "release"])
-        self.assertEqual(ctx.sleeps, [.01])
+        self.assertEqual(reset.actions, ["assert", "release", "release"] * 2)
+        self.assertEqual(ctx.sleeps, [.01, .01])
         states = [state for state, _ in ctx.events]
         expected = ["ASSERT_RESET", "START_PROGRAMMER", "RELEASE_RESET_AT_CONFIGURED_TIME", "WAIT_FLASH_AND_VERIFY"]
-        self.assertEqual([state for state in states if state in expected], expected)
+        self.assertEqual([state for state in states if state in expected], expected * 2)
+        self.assertLess(states.index("FLASH_ERASE_SUCCEEDED"), states.index("WRITE_FLASH"))
+        self.assertTrue(result.data["erase"]["success"])
+        self.assertEqual(result.data["erase"]["scope"], "all")
+        self.assertIn("ERASED", (ctx.path / "erase.log").read_text())
         self.assertEqual(len(programmer.images), 1)
         self.assertEqual(len(result.data["attempts"]), 1)
         self.assertIn("VERIFIED", (ctx.path / "flash.log").read_text())
         self.assertIn("sha256", result.data)
         self.assertTrue(json.loads((ctx.path / "flash_result.json").read_text())["success"])
 
+    def test_erase_failure_or_missing_evidence_prevents_write(self):
+        marker = self.root / "write_started"
+        write_code = f"from pathlib import Path; Path({str(marker)!r}).touch(); print('CONNECTED\\nWRITTEN\\nVERIFIED')"
+        for erase_code in ("print('CONNECTED')",
+                           "import sys; print('CONNECTED\\nERASED'); sys.exit(7)"):
+            with self.subTest(erase_code=erase_code):
+                result, ctx, reset, _ = self.flash(write_code, erase_code=erase_code)
+                self.assertEqual(result.error_code, "FLASH_ERASE_FAILED")
+                self.assertFalse(marker.exists())
+                self.assertFalse(result.data["erase"]["success"])
+                self.assertEqual(reset.actions, ["assert", "release", "release"])
+                self.assertNotIn("WRITE_FLASH", [state for state, _ in ctx.events])
+                self.assertFalse(json.loads((ctx.path / "flash_result.json").read_text())["success"])
+
+    def test_erase_connect_failure_prevents_write(self):
+        result, ctx, _, _ = self.flash(erase_code="print('no target')")
+        self.assertEqual(result.error_code, "CONNECT_FAILED")
+        self.assertNotIn("WRITE_FLASH", [state for state, _ in ctx.events])
+
+    def test_invalid_erase_pattern_prevents_all_hardware_operations(self):
+        for value in ("", "["):
+            with self.subTest(value=value):
+                self.config["flash"]["erase_success_pattern"] = value
+                result, _, reset, _ = self.flash()
+                self.assertEqual(result.error_code, "FLASH_CONFIG_INVALID")
+                self.assertFalse(reset.actions)
+
+    def test_cancellation_after_erase_prevents_write(self):
+        image, manifest, ctx = self.artifact()
+        class CancelAfterErase(ProcessRunner):
+            def run(self, *args, **kwargs):
+                result = super().run(*args, **kwargs)
+                ctx.cancelled.set()
+                return result
+        marker = self.root / "write_started"
+        programmer = FakeProgrammer(f"from pathlib import Path; Path({str(marker)!r}).touch()")
+        result = FlashService(programmer, CancelAfterErase()).flash(
+            self.config, ctx, FakeSession(), FakeReset(), image, manifest)
+        self.assertEqual(result.error_code, "CANCELLED")
+        self.assertTrue(result.data["erase"]["success"])
+        self.assertFalse(marker.exists())
+
+    def test_nonbase_address_is_rejected_before_erase(self):
+        image, manifest, ctx = self.artifact()
+        self.config["flash"].update(address=0x08002000, region_size=0x10000)
+        manifest["address"] = 0x08002000
+        reset = FakeReset()
+        result = FlashService().flash(self.config, ctx, FakeSession(), reset, image, manifest)
+        self.assertEqual(result.error_code, "FLASH_CONFIG_INVALID")
+        self.assertFalse(reset.actions)
+
     def test_connect_only_skips_artifact_and_unverified_write_gate(self):
         self.config["flash"].update(cli_verified=False, compatibility_verified=False, verify=False)
         self.config["flash"].pop("write_success_pattern")
         self.config["flash"].pop("verify_success_pattern")
+        self.config["flash"].pop("erase_success_pattern")
         result, _, _, programmer = self.flash("print('CONNECTED')", connect_only=True)
         self.assertTrue(result.success, result.to_dict())
         self.assertEqual(programmer.images, [None])

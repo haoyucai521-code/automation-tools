@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-23",
+  "run_id": "20261023T071143715782Z_r157h_display_apm32_trial_4aa03135",
+  "success": true,
+  "board": "R157H display, APM32E030 (user confirmed)",
+  "port": "COM7",
+  "baudrate": 9600,
+  "asserted_rts_value": true,
+  "release_delay_ms": 200,
+  "connection": {
+    "interface": "SWD",
+    "mode": "NORMAL",
+    "reset": "SWrst",
+    "cli_version": "2.16.0",
+    "reported_device_id": "0x440",
+    "reported_device_name": "STM32F05x/F030x8",
+    "reported_flash_size": 65536
+  },
+  "source_type": "user_supplied",
+  "source_path": "C:\\Users\\user\\Desktop\\app.bin",
+  "build_performed": false,
+  "image_size": 29547,
+  "image_sha256": "703e4fb76b7b2a242d92902a2ea8c132b033eefcd8adcf5f4a7dc008e2c4e99d",
+  "address": "0x08000000",
+  "backup": {
+    "path": "D:\\Chy\\automation\\runs\\20261023T071143715782Z_r157h_display_apm32_trial_4aa03135\\flash_before.bin",
+    "size": 65536,
+    "sha256": "78c6e8d453776216f7e016e79a2ccb0d1891c158e755ff915c4de682de16c8b0",
+    "returncode": 0
+  },
+  "erase": {
+    "command": [
+      "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "reset=SWrst",
+      "-e",
+      "all"
+    ],
+    "returncode": 0,
+    "positive_marker": "Mass erase successfully achieved",
+    "readback_path": "D:\\Chy\\automation\\runs\\20261023T071143715782Z_r157h_display_apm32_trial_4aa03135\\flash_after_erase.bin",
+    "readback_size": 65536,
+    "all_ff": true
+  },
+  "write": {
+    "command": [
+      "C:/Program Files/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe",
+      "-c",
+      "port=SWD",
+      "mode=NORMAL",
+      "reset=SWrst",
+      "-w",
+      "D:\\Chy\\automation\\runs\\20261023T071143715782Z_r157h_display_apm32_trial_4aa03135\\user_supplied_app.bin",
+      "0x08000000",
+      "-v"
+    ],
+    "returncode": 0,
+    "positive_marker": "File download complete",
+    "verify_marker": "Download verified successfully"
+  },
+  "independent_readback": {
+    "path": "D:\\Chy\\automation\\runs\\20261023T071143715782Z_r157h_display_apm32_trial_4aa03135\\firmware_readback.bin",
+    "size": 29547,
+    "matches_image": true
+  },
+  "boot_marker_seen": true,
+  "boot_version": "1.0.0.0",
+  "boot_build": "Oct 23 2026 14:31:01",
+  "cleanup": [
+    {
+      "action": "release_reset",
+      "success": true
+    },
+    {
+      "action": "close_serial",
+      "success": true
+    },
+    {
+      "action": "close_logs",
+      "success": true
+    }
+  ],
+  "original_evidence_dir": "runs\\20261023T071143715782Z_r157h_display_apm32_trial_4aa03135",
+  "scope": "One physical-board trial via existing low-level adapters; no fabricated build manifest; not a complete formal CLI build/flash/test acceptance.",
+  "stability_20_runs_verified": false,
+  "post_close_rts_level": "not measured; user observed possible reset hold when port closed",
+  "side_effect": "Mass erase cleared all internal Flash, including pre-existing parameters/KV; pre-erase backup retained, not automatically restored."
+}

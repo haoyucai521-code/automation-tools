@@ -1,4 +1,4 @@
-"""Single-attempt reset-assisted connection/flash with positive output evidence."""
+"""Single-attempt reset-assisted mass erase, write and verified programming."""
 from __future__ import annotations
 
 import json
@@ -93,7 +93,7 @@ class FlashService:
                     raise ToolError("FLASH_CONFIG_INVALID", "Flash verification is mandatory")
             pattern_names = ["connect_success_pattern"]
             if not connect_only:
-                pattern_names.extend(["write_success_pattern", "verify_success_pattern"])
+                pattern_names.extend(["erase_success_pattern", "write_success_pattern", "verify_success_pattern"])
             patterns = {}
             for name in pattern_names:
                 value = flash.get(name)
@@ -111,16 +111,41 @@ class FlashService:
                 raise ToolError("FLASH_CONFIG_INVALID", "Release delay must fit within the process timeout")
             command = self.programmer.command(config, None if connect_only else Path(image))
             data["command"] = command
+            erase_command = None if connect_only else self.programmer.erase_command(config)
             attempt = {"attempt": 1, "started_at_ns": time.time_ns(), "command": command,
                        "address": flash.get("address"), "sha256": data.get("sha256"),
                        "release_delay_ms": delay}
             attempts.append(attempt)
+            if erase_command is not None:
+                erase_log_path = Path(ctx.path) / "erase.log"
+                data["erase"] = {"scope": "all", "command": erase_command,
+                                 "log_path": str(erase_log_path), "success": False,
+                                 "warning": "Entire internal Flash, including KV, parameters and bootloader, is erased"}
+                attempt["erase"] = data["erase"]
+                ctx.event("ERASE_FLASH", scope="all", command=erase_command)
+                erased = self.strategy.run(erase_command, Path(ctx.path), timeout, ctx,
+                                           erase_log_path, session, reset, delay)
+                erase_output = erased.output.replace("\r\n", "\n").replace("\r", "\n")
+                erase_matched = {name: bool(patterns[name].search(erase_output)) for name in
+                                 ("connect_success_pattern", "erase_success_pattern")}
+                data["erase"].update(returncode=erased.returncode, duration_ms=erased.duration_ms,
+                                     matched=erase_matched)
+                if not erase_matched["connect_success_pattern"]:
+                    raise ToolError("CONNECT_FAILED", "Erase CLI did not report a successful connection")
+                if erased.returncode != 0 or not erase_matched["erase_success_pattern"]:
+                    raise ToolError("FLASH_ERASE_FAILED", "Mass erase did not succeed; write was not started")
+                data["erase"]["success"] = True
+                ctx.event("FLASH_ERASE_SUCCEEDED", scope="all")
+                ctx.check()
+                session.check()
+                ctx.event("WRITE_FLASH", address=flash["address"])
             result = self.strategy.run(command, Path(ctx.path), timeout, ctx, log_path,
                                        session, reset, delay)
             # CLI output is archived verbatim; normalize platform line endings
             # only for configured multiline expressions such as ^CONNECTED$.
             output = result.output.replace("\r\n", "\n").replace("\r", "\n")
-            matched = {name: bool(pattern.search(output)) for name, pattern in patterns.items()}
+            matched = {name: bool(pattern.search(output)) for name, pattern in patterns.items()
+                       if name != "erase_success_pattern"}
             attempt.update(returncode=result.returncode, duration_ms=result.duration_ms,
                            finished_at_ns=time.time_ns(), matched=matched)
             data.update(returncode=result.returncode, matched=matched)

@@ -158,11 +158,13 @@ def validate_config(config: dict, operation: str) -> None:
             raise ToolError("CONFIG_INVALID", "第一版禁止跳过写入校验")
         for key in ("address", "region_start", "region_size"):
             f[key] = integer(f.get(key), f"flash.{key}")
+        if f["address"] != 0x08000000:
+            raise ToolError("CONFIG_INVALID", "当前 STM32/APM32 流程要求固件从 0x08000000 开始")
         if not 0 <= f["region_start"] <= f["address"] < f["region_start"] + f["region_size"] <= 2**32:
             raise ToolError("CONFIG_INVALID", "烧录地址和允许区域无效")
         text(f.get("address_source"), "flash.address_source")
         if flash_needed:
-            for key in ("write_success_pattern", "verify_success_pattern"):
+            for key in ("erase_success_pattern", "write_success_pattern", "verify_success_pattern"):
                 pattern(f.get(key), f"flash.{key}")
     if operation == "run":
         startup = config["startup"]

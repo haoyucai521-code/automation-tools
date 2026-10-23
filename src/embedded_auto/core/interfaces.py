@@ -14,6 +14,7 @@ class Builder(Protocol):
 
 
 class Programmer(Protocol):
+    def erase_command(self, config: dict) -> list[str]: ...
     def command(self, config: dict, image: Path | None = None) -> list[str]: ...
 
 

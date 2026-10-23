@@ -1,6 +1,10 @@
 # 开发交付与验收状态
 
-日期：2026-10-21。依据 `dev_plan/embedded_auto_development_plan.md` 实施；原计划与用户文件保留不改。**软件功能已实现，硬件/真实固件端到端验收尚受阻，不能宣称整份计划的实测验收已完成。**
+初始交付日期：2026-10-21。依据 `dev_plan/embedded_auto_development_plan.md` 实施；原计划与用户文件保留不改。
+
+**2026-10-23 更新：当前 APM32E030 显示板的 COM7/9600、RTS 极性、复位辅助连接、外部 BIN 单次备份/写入/校验及启动日志均已实际通过。** 使用 NORMAL/SWrst，CLI 启动后 200 ms 释放复位。详见 `HARDWARE_VALIDATION_2026-10-23.md` 和 `tool-evidence/display_apm32_validation_2026-10-23.json`。其他板卡、正式构建到协议测试闭环、20 次稳定性仍未验收；以下阶段表和矩阵保留初始交付时的状态。
+
+随后按用户要求加入全片擦除阶段，STM32/APM32 统一从 `0x08000000` 写入；擦除成功后才允许写入，connect-only 不擦除。新增失败/取消阻止写入、固定地址、dry-run 警告等回归后，**101 项 unittest 全部通过**，日志见 `runs/verification_mass_erase_2026-10-23.txt`。用户进一步授权后，当前 APM32E030 显示板的新流程也已单次实测通过：备份 64 KB、全片擦除、独立读回 64 KB 全 `0xFF`、写入/校验、独立固件读回一致、复位启动日志。新证据为 `tool-evidence/display_apm32_mass_erase_2026-10-23.json`，不复用旧按段擦除报告；未恢复旧参数/KV，未完成连续 20 次或正式 CLI 的外部 BIN 导入验收。
 
 ## 阶段对照
 

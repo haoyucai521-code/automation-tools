@@ -36,6 +36,8 @@ embedded-auto report --run-id <run_id> --json
 
 每次操作使用独立 `runs/<run_id>/`；保留配置、状态事件、Git 状态/diff、BIN 快照/清单、构建与烧录结果、串口原始字节、测试报告和 Agent 摘要。不自动重试烧录，不删除历史失败记录。
 
+**当前 STM32/APM32 烧录策略：先全片擦除，再从 `0x08000000` 写入并校验。** 擦除失败不继续写入；`connect` 不执行擦除。全片擦除会清除内部 Flash 中的 Bootloader、KV 和参数，执行前自行备份需要保留的内容。目标配置需填写真实的 `erase_success_pattern`；dry-run 会显示擦除命令和警告。
+
 ## 文档
 
 - `docs/CLI_REFERENCE.md`：命令、配置与协议断言格式。

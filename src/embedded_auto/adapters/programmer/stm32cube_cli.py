@@ -9,6 +9,10 @@ from embedded_auto.core.errors import ToolError
 
 
 class CubeProgrammer:
+    def erase_command(self, config: dict) -> list[str]:
+        """Erase in a separate process so failure can prevent every write."""
+        return self.command(config) + ["-e", "all"]
+
     def command(self, config: dict, image: Path | None = None) -> list[str]:
         flash = config["flash"]
         executable = flash.get("executable")
@@ -22,8 +26,8 @@ class CubeProgrammer:
         command = [executable, "-c", f"port={interface}", f"mode={mode}", f"reset={reset_mode}"]
         if image is not None:
             address = flash.get("address")
-            if type(address) is not int or address < 0 or address >= 2**32:
-                raise ToolError("FLASH_CONFIG_INVALID", "A valid explicit BIN address is required")
+            if type(address) is not int or address != 0x08000000:
+                raise ToolError("FLASH_CONFIG_INVALID", "STM32/APM32 images must start at 0x08000000")
             if flash.get("verify") is not True:
                 raise ToolError("FLASH_CONFIG_INVALID", "BIN writes require verification")
             command.extend(["-w", str(image), f"0x{address:08X}", "-v"])
