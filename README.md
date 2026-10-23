@@ -1,50 +1,37 @@
 # Embedded Auto
 
-以 Python 实现的 Windows 本地嵌入式自动化工具：IAR/GCC 构建、BIN 身份与区域校验、CH340 RTS 复位、STM32CubeProgrammer、原始串口归档、确定性协议测试及有限 Agent 修复策略。
+Windows/Python 本地嵌入式自动化工具：IAR/GCC 构建、BIN 身份与区域校验、CH340 RTS 复位、CubeProgrammer 全片擦除/写入/校验、串口证据、确定性协议测试和有限 Agent 修复回调。
 
-**软件实现与无硬件验证已提供；真实板卡验收尚未完成。** 三个目标文件均为不可直接执行的模板。APM32E030 兼容性未作假定，不会自动填写烧录地址、极性或成功标志。
+**当前 APM32E030 显示板已完成单次全擦、写入校验和启动日志实测。** 这不是三平台或完整真实构建/协议闭环验收；三个目标 YAML 仍为阻塞模板。当前支持矩阵和实机证据只在 [验收记录](docs/VALIDATION.md) 维护。
 
-## 安装与快速检查
+## 安装与安全预览
 
-要求 Python 3.11+。通常使用 `python3`；本次 Windows 环境使用已安装的 `python`：
+Python 3.11+。本机没有 `python3` 命令，使用已安装的 `python`：
 
 ```powershell
 python -m pip install -e .
 embedded-auto --help
 embedded-auto run --target stm32f030 --suite example_protocol --dry-run --json
+```
+
+dry-run 不构建、不打开串口、不操作目标；返回成功仅指计划生成，继续检查 `data.ready_for_execution` 和 `blocking_issues`。真实操作前按 [使用指南](docs/USER_GUIDE.md) 核对工程、布局、电气与授权，先只连接再烧录。
+
+**当前烧录会全片擦除，参数/KV/Bootloader 都可能丢失；正式流程不自动备份或恢复。** 固定写入起点与完整操作说明见 [烧录与启动](docs/USER_GUIDE.md#烧录与启动)。
+
+## 开发与文档
+
+| 入口 | 职责 |
+| --- | --- |
+| [AGENTS.md](AGENTS.md) | Agent 开发约束、按需阅读和文档更新路由，不授予硬件/Git 操作权限 |
+| [编码规范](docs/CODING_GUIDE.md) | 当前 Python 风格、分层、异常/资源、测试与证据要求 |
+| [项目设计与模块索引](docs/design/PROJECT_DESIGN.md) | 当前模块、数据模型、流程和资源所有权；不另建重复索引/资源表 |
+| [使用指南](docs/USER_GUIDE.md) | CLI、配置、硬件接入、协议、Agent API 和排障 |
+| [验收记录](docs/VALIDATION.md) | 支持矩阵、软件/实机结果、原始证据入口和验收缺口 |
+
+Agent 先按设计索引定位本轮相关代码，再依编码规范实现/复验，按路由仅更新受影响文档；不必每轮阅读全部资料。源码在 `src/embedded_auto`，测试在 `tests`：
+
+```powershell
 python -m unittest discover -s tests -v
 ```
 
-`--dry-run` 只保存执行计划和命令参数，不编译、不打开串口、不连接或写入目标。返回成功表示计划生成成功；配置/套件的已知阻塞项请读取 `data.ready_for_execution` 和 `blocking_issues`，不代表工具、板卡或产物已经可用。真实操作遇到未确认字段返回 `CONFIG_INVALID`。
-
-## 首次接入
-
-1. 阅读 `docs/HARDWARE_SETUP.md`，先确认电气安全，再填写 `configs/app.yaml` 的串口及目标 YAML。
-2. 从真实工程的 linker 配置填写准确芯片、BIN 地址、允许区域、地址来源和构建命令。
-3. 核对本机 CubeProgrammer `--help`，配置实际工具路径与成功输出正则。
-4. 先 `connect` 做只连接时序实验，每次保存报告；确认后才设置目标 `status: verified`、`compatibility_verified` 和 `timing_verified`。
-5. 调整示例协议断言，再运行完整工作流。
-
-```powershell
-embedded-auto device check --target stm32f030 --json
-embedded-auto build --target stm32f030 --backend gcc --json
-embedded-auto connect --target stm32f030 --json
-embedded-auto monitor --target stm32f030 --duration 30 --json
-embedded-auto run --target stm32f030 --suite example_protocol --timeout 120 --json
-embedded-auto report --run-id <run_id> --json
-```
-
-每次操作使用独立 `runs/<run_id>/`；保留配置、状态事件、Git 状态/diff、BIN 快照/清单、构建与烧录结果、串口原始字节、测试报告和 Agent 摘要。不自动重试烧录，不删除历史失败记录。
-
-**当前 STM32/APM32 烧录策略：先全片擦除，再从 `0x08000000` 写入并校验。** 擦除失败不继续写入；`connect` 不执行擦除。全片擦除会清除内部 Flash 中的 Bootloader、KV 和参数，执行前自行备份需要保留的内容。目标配置需填写真实的 `erase_success_pattern`；dry-run 会显示擦除命令和警告。
-
-## 文档
-
-- `docs/CLI_REFERENCE.md`：命令、配置与协议断言格式。
-- `docs/ARCHITECTURE.md`：模块边界和安全机制。
-- `docs/AGENT_GUIDE.md`：稳定 JSON 契约、修复回调及停止策略。
-- `docs/HARDWARE_SETUP.md`：接线、实测步骤与连接实验。
-- `docs/TROUBLESHOOTING.md`：错误分类与恢复。
-- `docs/DEVELOPMENT_STATUS.md`：计划逐阶段交付情况、支持矩阵与验收缺口。
-
-MCP、GUI、多板并发及动态插件不属于本版；CLI 与 Python 接口不依赖任何 Agent 供应商。
+测试使用 Fake 硬件及可选真实 ARM GCC 合成编译，不做实机擦除。硬件操作须另行明确授权。运行证据在忽略提交的 `runs/`，精简实测 JSON 与本机工具输出保留于 `docs/tool-evidence/`；[原始开发计划](docs/archive/embedded_auto_development_plan.md) 仅作历史归档。

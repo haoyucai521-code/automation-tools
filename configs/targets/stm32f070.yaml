@@ -1,4 +1,4 @@
-# 模板不能直接用于硬件。按 docs/HARDWARE_SETUP.md 逐项实测后修改。
+# 模板不能直接用于硬件。按 docs/USER_GUIDE.md 逐项实测后修改。
 target:
   id: stm32f070
   family: STM32
