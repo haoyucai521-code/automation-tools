@@ -15,7 +15,7 @@ from embedded_auto.services.log_analyzer import LogAnalyzer
 from embedded_auto.services.log_service import LogService
 from embedded_auto.services.reset_controller import ResetController
 from embedded_auto.services.serial_session import SerialSession
-from embedded_auto.services.test_runner import TestRunner, validate_suite
+from embedded_auto.services.test_runner import TestRunner, _RegexMatcher, validate_suite
 
 
 def config():
@@ -268,6 +268,33 @@ class SerialProtocolTests(unittest.TestCase):
         self.session.close()
         other.open()
 
+    def test_open_reader_start_failure_releases_rts_before_close(self):
+        log = LogService(self.session, self.ctx)
+        log.start()
+        self.addCleanup(log.close)
+        with patch.object(threading.Thread, 'start', side_effect=RuntimeError('cannot start reader')):
+            error = self.error_code('SERIAL_OPEN_FAILED', self.session.open)
+        # 释放发生在 close 之前：释放时端口仍处于打开状态；句柄未打开时不强行释放。
+        self.assertEqual(self.fake.history[-2:], [('open', True), ('rts', True, True)])
+        self.assertEqual(self.fake.close_calls, 1)
+        self.assertIsNone(error.data['cleanup_error'])
+
+    def test_open_failure_after_handle_open_reports_release_and_close_errors(self):
+        class HalfOpenSerial(FakeSerial):
+            def open(self):
+                self.is_open = True
+                raise OSError('open partially failed')
+        bad = HalfOpenSerial()
+        bad.on_rts = lambda value: setattr(bad, 'control_error', True)  # 预置成功，释放尝试失败
+        bad.close_failures = 1
+        self.session._factory = lambda **kwargs: bad
+        error = self.error_code('SERIAL_OPEN_FAILED', self.session.open)
+        self.assertIn('open partially failed', str(error))  # 原始 open 错误保留
+        self.assertIn('RTS disconnected', error.data['cleanup_error'])
+        self.assertIn('close failed', error.data['cleanup_error'])
+        other = self.new_session()  # 关闭失败，所有权保留
+        self.error_code('SERIAL_PORT_BUSY', other.open)
+
     def test_failed_close_can_be_retried_and_retains_ownership(self):
         self.start()
         self.fake.close_failures = 1
@@ -359,6 +386,9 @@ class SerialProtocolTests(unittest.TestCase):
         def slow_false(data):
             time.sleep(0.004)
             return False
+        # 首字节屏障：确认忙碌串流已进入接收缓冲后再计时，
+        # 避免生产者线程启动延迟让 deadline 内没有任何字节而返回 b''。
+        self.assertTrue(self.session.wait_for(lambda data: bool(data), 5, self.ctx))
         began = time.monotonic()
         try:
             data = self.session.wait_for(slow_false, 0.03, self.ctx)
@@ -520,6 +550,15 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(len(result.data['tests'][0]['rx_hex']), 2002)
         self.assertTrue((self.ctx.path / 'test_report.json').exists())
         self.assertFalse(any(p.name == 'protocol-regex' for p in multiprocessing.active_children()))
+
+    def test_regex_matcher_error_code_parameterization_keeps_default(self):
+        from multiprocessing.context import SpawnProcess
+        matcher = _RegexMatcher(self.ctx)
+        self.assertEqual(matcher.error_code, 'PROTOCOL_TEST_FAILED')  # 默认保持协议契约
+        with patch.object(SpawnProcess, 'start', side_effect=OSError('spawn failed')):
+            startup = _RegexMatcher(self.ctx, error_code='BOOT_MATCHER_FAILED')
+            error = self.error_code('BOOT_MATCHER_FAILED', startup.start)
+        self.assertIn('Could not start regex worker', str(error))
 
     def test_no_response_fails_even_vacuous_length_and_regex(self):
         result = self.run_response({'length': 0, 'regex': '.*'}, b'')

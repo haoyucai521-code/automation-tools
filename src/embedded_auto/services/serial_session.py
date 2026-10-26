@@ -70,17 +70,25 @@ class SerialSession:
                 self._port.open()
                 self._start_reader()
             except Exception as exc:
-                cleanup = None
+                failures = []
                 self._stop.set()
                 if self._port is not None:
+                    if getattr(self._port, 'is_open', False):
+                        # 句柄已打开时 close 前尽力把 RTS 恢复为已确认释放值；
+                        # 不能用 set_rts（_stop 已置位会被拒绝），也不证明关闭后的物理电平。
+                        try:
+                            self._port.rts = not self.config['reset']['asserted_rts_value']
+                        except Exception as release_exc:
+                            failures.append(f'rts release failed: {release_exc}')
                     try:
                         self._port.close()
                         self._port = None
                     except Exception as close_exc:
-                        cleanup = str(close_exc)
+                        failures.append(f'close failed: {close_exc}')
                 if self._port is None:
                     self._release_owner()
-                raise ToolError('SERIAL_OPEN_FAILED', str(exc), {'cleanup_error': cleanup}) from exc
+                raise ToolError('SERIAL_OPEN_FAILED', str(exc),
+                                {'cleanup_error': '; '.join(failures) if failures else None}) from exc
 
     def _start_reader(self):
         # Logging files must be open and subscribed before any bytes are read.

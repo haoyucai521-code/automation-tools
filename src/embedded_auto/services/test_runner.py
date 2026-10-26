@@ -133,8 +133,10 @@ def _regex_worker(connection):
 
 
 class _RegexMatcher:
-    def __init__(self, ctx):
+    def __init__(self, ctx, error_code='PROTOCOL_TEST_FAILED'):
         self.ctx = ctx
+        # 复用方按调用语义分类故障；协议测试保持原有 PROTOCOL_TEST_FAILED 契约。
+        self.error_code = error_code
         self.process = None
         self.connection = None
         self.timed_out = False
@@ -148,15 +150,15 @@ class _RegexMatcher:
         try:
             self.process.start()
         except (OSError, RuntimeError) as exc:
-            raise ToolError('PROTOCOL_TEST_FAILED', 'Could not start regex worker: ' + str(exc)) from exc
+            raise ToolError(self.error_code, 'Could not start regex worker: ' + str(exc)) from exc
         finally:
             child.close()
         while not self.connection.poll(0.01):
             self.ctx.check()
             if not self.process.is_alive():
-                raise ToolError('PROTOCOL_TEST_FAILED', 'Regex worker exited during startup')
+                raise ToolError(self.error_code, 'Regex worker exited during startup')
         if self.connection.recv() != 'ready':
-            raise ToolError('PROTOCOL_TEST_FAILED', 'Regex worker did not initialize')
+            raise ToolError(self.error_code, 'Regex worker did not initialize')
 
     def search(self, pattern, data, deadline):
         if self.timed_out or time.monotonic() >= deadline:
@@ -165,7 +167,7 @@ class _RegexMatcher:
         try:
             self.connection.send((pattern, data))
         except (EOFError, OSError) as exc:
-            raise ToolError('PROTOCOL_TEST_FAILED', 'Regex worker communication failed: ' + str(exc)) from exc
+            raise ToolError(self.error_code, 'Regex worker communication failed: ' + str(exc)) from exc
         while True:
             self.ctx.check()
             remaining = deadline - time.monotonic()
@@ -177,9 +179,9 @@ class _RegexMatcher:
                 try:
                     return self.connection.recv()
                 except (EOFError, OSError) as exc:
-                    raise ToolError('PROTOCOL_TEST_FAILED', 'Regex worker communication failed: ' + str(exc)) from exc
+                    raise ToolError(self.error_code, 'Regex worker communication failed: ' + str(exc)) from exc
             if not self.process.is_alive():
-                raise ToolError('PROTOCOL_TEST_FAILED', 'Regex worker exited during matching')
+                raise ToolError(self.error_code, 'Regex worker exited during matching')
 
     def close(self):
         if self.process is not None:

@@ -1,7 +1,7 @@
 import copy
 import json
-import re
 import shutil
+import time
 from pathlib import Path
 
 from embedded_auto.core.config import number, validate_config, validation_issues
@@ -150,8 +150,9 @@ class WorkflowEngine:
                     logger.start()
                     session.open()
                     opened = True
-                    session.check()
+                    # 复位控制器构造不触碰硬件，尽早创建，使 check 失败也走 release_reset 清理。
                     reset = self.reset_factory(session, config, ctx)
+                    session.check()
                     if operation in ("run", "flash", "connect"):
                         flashed = self.flasher.flash(config, ctx, session, reset, image, manifest,
                                                      connect_only=operation == "connect")
@@ -167,11 +168,36 @@ class WorkflowEngine:
                         ctx.event("WAIT_BOOT")
                         startup = config["startup"]
                         if startup.get("ready_pattern"):
-                            regex = re.compile(startup["ready_pattern"])
+                            # 病态启动正则复用协议测试的独立工作进程：受启动超时与总截止时间约束，
+                            # 超时后回收工作进程并继续硬件清理；保持按 serial.encoding 解码的文本正则语义。
+                            from .test_runner import _RegexMatcher
                             encoding = config["serial"].get("encoding", "utf-8")
-                            predicate = lambda data: bool(regex.search(data.decode(encoding, "replace")))
-                            received = session.wait_for(predicate, startup.get("timeout_s", 5), ctx, start=boot_start)
-                            if not predicate(received):
+                            timeout_s = startup.get("timeout_s", 5)
+                            # 匹配器自身故障不是固件协议失败，也不可进入修复循环。
+                            matcher = _RegexMatcher(ctx, error_code="BOOT_MATCHER_FAILED")
+                            evaluated, matched = None, False
+                            try:
+                                matcher.start()
+                                deadline = time.monotonic() + min(timeout_s, ctx.remaining)
+
+                                def startup_ready(data):
+                                    # 数据增长才重新匹配，避免忙碌串流下重复回溯。
+                                    nonlocal evaluated, matched
+                                    if data and data != evaluated:
+                                        evaluated = data
+                                        matched = matcher.search(startup["ready_pattern"],
+                                                                 data.decode(encoding, "replace"), deadline) is not None
+                                    return matched
+
+                                received = session.wait_for(startup_ready, timeout_s, ctx, start=boot_start)
+                                if received != evaluated:
+                                    startup_ready(received)  # wait_for 最终返回的数据可能晚于上一次评估
+                            finally:
+                                try:
+                                    matcher.close()
+                                except Exception as exc:
+                                    cleanup.append({"action": "close_regex_worker", "success": False, "message": str(exc)})
+                            if not matched:
                                 raise ToolError("BOOT_TIMEOUT", "未在超时内检测到启动标志", {"received_hex": received.hex(), "start_offset": boot_start})
                             steps["boot"] = {"method": "ready_pattern", "start_offset": boot_start, "received_hex": received.hex()}
                         else:
@@ -200,7 +226,11 @@ class WorkflowEngine:
             result = OperationResult(False, operation, "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}", data=steps)
             ctx.event("FAILED", error_code="INTERNAL_ERROR", message=str(exc))
         finally:
-            ctx.event("CLEANUP")
+            try:
+                ctx.event("CLEANUP")
+            except Exception as exc:
+                # 事件归档故障只记录为清理失败，绝不跳过剩余硬件清理动作。
+                cleanup.append({"action": "cleanup_event", "success": False, "message": str(exc)})
             if opened and reset is not None:
                 try:
                     reset.release_reset()

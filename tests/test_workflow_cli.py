@@ -2,9 +2,11 @@ import contextlib
 import copy
 import io
 import json
+import multiprocessing
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,6 +21,7 @@ from embedded_auto.core.errors import ToolError
 from embedded_auto.core.models import OperationResult
 from embedded_auto.core.run_context import RunContext
 from embedded_auto.services.flash_service import FlashService
+from embedded_auto.services.serial_session import SerialSession
 from embedded_auto.services.workflow_engine import WorkflowEngine
 
 
@@ -90,7 +93,9 @@ class MemorySerial:
 
     def wait_for(self, predicate, timeout_s, ctx, start=0):
         ctx.check()
-        return self.received_since(start)
+        data = self.received_since(start)
+        predicate(data)
+        return data
 
 
 class PythonProgrammer:
@@ -99,6 +104,60 @@ class PythonProgrammer:
 
     def command(self, config, image=None):
         return [sys.executable, "-c", "print('CONNECTED WRITTEN VERIFIED')"]
+
+
+class FeedSerial:
+    """真实 SerialSession 用的最小假端口：RTS 释放沿灌入启动字节，不触碰硬件。"""
+
+    def __init__(self, **kwargs):
+        self.is_open = False
+        self._rts = True
+        self.on_release = None
+        self.on_write = None
+        self._incoming = bytearray()
+        self._condition = threading.Condition()
+        self.timeout = kwargs.get("timeout", 0.01)
+
+    @property
+    def rts(self):
+        return self._rts
+
+    @rts.setter
+    def rts(self, value):
+        old, self._rts = self._rts, value
+        if self.is_open and old and not value and self.on_release:
+            self.on_release()
+
+    def open(self):
+        self.is_open = True
+
+    def close(self):
+        self.is_open = False
+
+    def feed(self, data):
+        with self._condition:
+            self._incoming.extend(data)
+            self._condition.notify_all()
+
+    def read(self, size):
+        with self._condition:
+            if not self._incoming:
+                self._condition.wait(self.timeout)
+            data = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return data
+
+    def write(self, data):
+        if self.on_write:
+            self.on_write(bytes(data))
+        return len(data)
+
+
+class OkFlash:
+    """跳过真实烧录子进程，直接走到 WAIT_BOOT。"""
+
+    def flash(self, *args, **kwargs):
+        return OperationResult(True, "flash", message="fake flash success")
 
 
 class WorkflowTests(unittest.TestCase):
@@ -166,6 +225,150 @@ class WorkflowTests(unittest.TestCase):
         result = self.engine(flasher=FailedFlash(), reset_factory=BadReset).execute(self.config, "run", suite=SUITE)
         self.assertEqual(result.error_code, "FLASH_FAILED")
         self.assertFalse(result.data["cleanup"][0]["success"])
+
+    def test_cleanup_event_failure_still_releases_and_closes_hardware(self):
+        class FailedFlash:
+            def flash(self, *args, **kwargs):
+                return OperationResult(False, "flash", "FLASH_FAILED", "original")
+        releases = []
+        class RecordingReset:
+            state = "ASSERTED"
+            def __init__(self, *args):
+                pass
+            def pulse(self, duration_ms=None):
+                pass
+            def release_reset(self):
+                releases.append(True)
+        original_event = RunContext.event
+        def broken_event(self, state, **data):
+            if state == "CLEANUP":
+                raise OSError("events.jsonl unwritable")
+            return original_event(self, state, **data)
+        with patch.object(RunContext, "event", broken_event):
+            result = self.engine(flasher=FailedFlash(), reset_factory=RecordingReset).execute(self.config, "run", suite=SUITE)
+        self.assertEqual(result.error_code, "FLASH_FAILED")  # 主错误保留，不被清理故障覆盖
+        self.assertTrue(releases)
+        self.assertTrue(self.sessions[0].closed)
+        actions = {item["action"]: item["success"] for item in result.data["cleanup"]}
+        self.assertIs(actions["release_reset"], True)
+        self.assertIs(actions["close_serial"], True)
+        self.assertIs(actions["close_logs"], True)
+        self.assertIs(actions["cleanup_event"], False)
+
+    def test_cleanup_event_failure_fails_otherwise_successful_run(self):
+        original_event = RunContext.event
+        def broken_event(self, state, **data):
+            if state == "CLEANUP":
+                raise OSError("events.jsonl unwritable")
+            return original_event(self, state, **data)
+        with patch.object(RunContext, "event", broken_event):
+            result = self.engine().execute(self.config, "run", suite=SUITE)
+        self.assertFalse(result.success)  # 操作成功但清理失败仍应失败
+        self.assertEqual(result.error_code, "CLEANUP_FAILED")
+        self.assertTrue(self.sessions[0].closed)
+        self.assertFalse(self.sessions[0].rts)
+        actions = {item["action"]: item["success"] for item in result.data["cleanup"]}
+        self.assertIs(actions["close_serial"], True)
+        self.assertIs(actions["cleanup_event"], False)
+
+    def test_session_check_failure_after_open_releases_reset_and_closes_serial(self):
+        class CheckFails(MemorySerial):
+            def check(self):
+                raise ToolError("SERIAL_READ_FAILED", "reader died right after open")
+        made = []
+        def factory(config):
+            made.append(CheckFails(config))
+            return made[-1]
+        result = WorkflowEngine(session_factory=factory).execute(self.config, "monitor", duration=0.05)
+        self.assertEqual(result.error_code, "SERIAL_READ_FAILED")
+        self.assertTrue(made[0].closed)
+        self.assertFalse(made[0].rts)  # 已确认释放值（asserted_rts_value=True）
+        release = [item for item in result.data["cleanup"] if item["action"] == "release_reset"]
+        self.assertEqual(release[0]["state"], "RELEASED")
+        self.assertTrue(release[0]["success"])
+        actions = {item["action"]: item["success"] for item in result.data["cleanup"]}
+        self.assertIn("close_serial", actions)
+        self.assertTrue(all(actions.values()))
+
+    def test_session_open_failure_closes_logs_and_session_without_release(self):
+        class OpenFails(MemorySerial):
+            def open(self):
+                raise ToolError("SERIAL_OPEN_FAILED", "port vanished")
+        made = []
+        def factory(config):
+            made.append(OpenFails(config))
+            return made[-1]
+        result = WorkflowEngine(session_factory=factory).execute(self.config, "monitor", duration=0.05)
+        self.assertEqual(result.error_code, "SERIAL_OPEN_FAILED")
+        self.assertTrue(made[0].closed)
+        actions = {item["action"]: item["success"] for item in result.data["cleanup"]}
+        self.assertIn("close_logs", actions)
+        self.assertNotIn("release_reset", actions)
+        self.assertTrue(all(actions.values()))
+
+    def test_startup_pathological_ready_pattern_is_bounded_and_reclaims_worker(self):
+        port = FeedSerial()
+        port.on_release = lambda: port.feed(b"x" * 23)
+        engine = WorkflowEngine(session_factory=lambda config: SerialSession(config, factory=lambda **kwargs: port),
+                                 flasher=OkFlash())
+        config = copy.deepcopy(self.config)
+        config["startup"] = {"ready_pattern": "(x+x+)+y", "timeout_s": 0.05, "settle_delay_s": 0}
+        began = time.monotonic()
+        result = engine.execute(config, "run", suite=SUITE)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "BOOT_TIMEOUT")
+        self.assertEqual(result.data["failure"]["received_hex"], (b"x" * 23).hex())
+        self.assertLess(time.monotonic() - began, 6)  # 硬上界：启动超时 50ms，不允许同步回溯拖垮流程
+        self.assertTrue(all(item["success"] for item in result.data["cleanup"]))
+        self.assertFalse(port.rts)
+        self.assertFalse(port.is_open)
+        self.assertFalse(any(p.name == "protocol-regex" for p in multiprocessing.active_children()))
+
+    def test_total_deadline_interrupts_pathological_startup_and_still_cleans_up(self):
+        port = FeedSerial()
+        port.on_release = lambda: port.feed(b"x" * 26)
+        engine = WorkflowEngine(session_factory=lambda config: SerialSession(config, factory=lambda **kwargs: port),
+                                 flasher=OkFlash())
+        config = copy.deepcopy(self.config)
+        config["startup"] = {"ready_pattern": "(x+x+)+y", "timeout_s": 30, "settle_delay_s": 0}
+        began = time.monotonic()
+        result = engine.execute(config, "run", suite=SUITE, timeout_s=2)
+        self.assertEqual(result.error_code, "WORKFLOW_TIMEOUT")
+        self.assertLess(time.monotonic() - began, 8)  # 硬上界：总截止 2s + 回收/清理
+        self.assertFalse(port.rts)
+        self.assertFalse(port.is_open)
+        self.assertFalse(any(p.name == "protocol-regex" for p in multiprocessing.active_children()))
+        self.assertTrue(all(item["success"] for item in result.data["cleanup"]))
+
+    def test_startup_ready_pattern_keeps_text_regex_semantics(self):
+        port = FeedSerial()
+        port.on_release = lambda: port.feed("你".encode("utf-8"))
+        port.on_write = lambda data: port.feed(b"PONG\r\n")
+        engine = WorkflowEngine(session_factory=lambda config: SerialSession(config, factory=lambda **kwargs: port),
+                                 flasher=OkFlash())
+        config = copy.deepcopy(self.config)
+        config["startup"] = {"ready_pattern": "^.$", "timeout_s": 2, "settle_delay_s": 0}
+        result = engine.execute(config, "run", suite=SUITE)
+        self.assertTrue(result.success, result.to_dict())
+        self.assertEqual(result.data["boot"]["method"], "ready_pattern")
+        # 单个多字节字符按文本计一个字符；若退化为字节匹配，^.$ 会误判 BOOT_TIMEOUT。
+        self.assertEqual(result.data["boot"]["received_hex"], "你".encode("utf-8").hex())
+
+    def test_startup_matcher_failure_is_boot_matcher_failed_not_repairable(self):
+        from multiprocessing.context import SpawnProcess
+        port = FeedSerial()
+        port.on_release = lambda: port.feed(b"BOOT READY\n")
+        engine = WorkflowEngine(session_factory=lambda config: SerialSession(config, factory=lambda **kwargs: port),
+                                 flasher=OkFlash())
+        config = copy.deepcopy(self.config)
+        config["startup"] = {"ready_pattern": "BOOT READY", "timeout_s": 2, "settle_delay_s": 0}
+        with patch.object(SpawnProcess, "start", side_effect=OSError("spawn failed")):
+            result = engine.execute(config, "run", suite=SUITE)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "BOOT_MATCHER_FAILED")  # 不误报为协议测试失败
+        self.assertNotIn(result.error_code, {"BOOT_TIMEOUT", "PROTOCOL_TEST_FAILED"})
+        self.assertFalse(port.is_open)
+        self.assertFalse(port.rts)
 
     def test_invalid_suite_blocked_before_build(self):
         builder = unittest.mock.Mock()

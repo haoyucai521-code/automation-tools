@@ -114,7 +114,7 @@ CLI -c port=SWD mode=NORMAL reset=SWrst -w firmware.bin 0x08000000 -v
 
 `flash.erase_success_pattern` 必须来自本机实际输出，不用总能匹配的宽泛正则；当前已实测文本与工具版本在 [验收记录](VALIDATION.md)。擦除证据见 `erase.log` 和 `flash_result.json` 的 `data.erase`；dry-run 显示顺序、命令及破坏性警告。
 
-`flash` 在校验后脉冲复位，不等待启动标志或执行协议测试；`run` 还根据 `startup.ready_pattern` 等待新固件启动，超时为 `startup.timeout_s`，使用 `serial.encoding` 解码。标志为空时只等 `settle_delay_s` 并明确标记弱判断，不声称检测到了启动。
+`flash` 在校验后脉冲复位，不等待启动标志或执行协议测试；`run` 还根据 `startup.ready_pattern` 等待新固件启动，超时为 `startup.timeout_s`，使用 `serial.encoding` 解码；病态启动正则在独立工作进程中执行，受启动超时与总截止时间约束。标志为空时只等 `settle_delay_s` 并明确标记弱判断，不声称检测到了启动。
 
 ## 协议套件
 
@@ -187,6 +187,7 @@ Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute,
 | `SERIAL_READ_FAILED/SERIAL_WRITE_FAILED/SERIAL_CONTROL_FAILED/SERIAL_CLOSE_FAILED/SERIAL_SUBSCRIBER_FAILED` | 检查驱动、断线、回调和清理结果；接收失败不应阻止释放复位 |
 | `SERIAL_BUFFER_RANGE` | 窗口已过期；原始文件仍保留，合理调整缓冲或判定窗口 |
 | `BOOT_TIMEOUT/PROTOCOL_TEST_FAILED` | 查最后复位后的 RX、编码、标志或逐条断言；不放宽预期制造 PASS |
+| `BOOT_MATCHER_FAILED` | 启动匹配器自身启动/通信故障，属环境问题而非固件协议失败；查本机进程/资源后重试，不进入修复循环 |
 | `WORKFLOW_TIMEOUT/CANCELLED` | 查进程、NRST、COM 清理记录，再决定下一步 |
 | `CLEANUP_FAILED/PROCESS_CLEANUP_FAILED/LOG_WRITE_FAILED` | 保留主故障和 PID/路径，检查磁盘、端口及硬件，不把报告失败当成功 |
 | `REPAIR_LIMIT_REACHED/REPAIR_POLICY_VIOLATION` | 停止，交付证据，不自动提高上限或修改保护规则 |
