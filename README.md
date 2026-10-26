@@ -27,6 +27,7 @@ dry-run 不构建、不打开串口、不操作目标；返回成功仅指计划
 | [项目设计与模块索引](docs/design/PROJECT_DESIGN.md) | 当前模块、数据模型、流程和资源所有权；不另建重复索引/资源表 |
 | [使用指南](docs/USER_GUIDE.md) | CLI、配置、硬件接入、协议、Agent API 和排障 |
 | [验收记录](docs/VALIDATION.md) | 支持矩阵、软件/实机结果、原始证据入口和验收缺口 |
+| [BLE 开发与测试方案](DEV_PLAN/BLE_TOOL_DEVELOPMENT_TEST_PLAN.md) | 基于新结构的 Fake MVP、适配契约及后续实机验收计划；尚未实现 |
 
 Agent 先按设计索引定位本轮相关代码，再依编码规范实现/复验，按路由仅更新受影响文档；不必每轮阅读全部资料。源码在 `src/embedded_auto`，测试在 `tests`：
 
