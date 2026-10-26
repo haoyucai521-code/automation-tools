@@ -1,0 +1,13 @@
+version: 1
+device:
+  id: "fake:demo"
+  name: "BLE Tool Demo"
+services:
+  - uuid: "12345678-1234-5678-1234-56789abc0000"
+    characteristics:
+      - uuid: "12345678-1234-5678-1234-56789abc0001"
+        properties: [read, write, notify]
+        initial_hex: "01 00"
+        on_write:
+          store: true
+          emit_notification: true

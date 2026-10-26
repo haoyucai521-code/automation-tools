@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .core.config import load_config, load_yaml, number
+from .application.config import load_config
+from .core.config import load_yaml, number
 from .core.errors import ToolError
 from .core.models import OperationResult
 from .core.paths import identifier, resolve_path
@@ -35,6 +36,30 @@ def parser():
     common(device)
     checks = device.add_subparsers(dest="device_command", required=True)
     common(checks.add_parser("check"))
+    ble = commands.add_parser("ble", help="BLE UUID 读写/通知验证；默认使用显式配置的后端")
+    ble_common(ble)
+    ble_commands = ble.add_subparsers(dest="ble_command", required=True)
+    for name in ("scan", "inspect", "read", "write", "notify", "test"):
+        sub = ble_commands.add_parser(name)
+        ble_common(sub)
+        if name == "scan":
+            sub.add_argument("--scan-timeout", type=float, default=argparse.SUPPRESS)
+            sub.add_argument("--name", default=argparse.SUPPRESS)
+        if name in ("read", "write", "notify"):
+            sub.add_argument("--service", required=True, help="完整 128 位 service UUID")
+            sub.add_argument("--characteristic", required=True, help="完整 128 位 characteristic UUID")
+        if name in ("read", "notify"):
+            sub.add_argument("--expect-hex", default=argparse.SUPPRESS)
+        if name in ("write", "test"):
+            sub.add_argument("--allow-write", action="store_true", default=argparse.SUPPRESS)
+            sub.add_argument("--confirm-device", default=argparse.SUPPRESS)
+        if name == "write":
+            sub.add_argument("--hex", required=True)
+            sub.add_argument("--write-mode", required=True, choices=("with-response", "without-response"))
+        if name == "notify":
+            sub.add_argument("--duration", type=float, default=2)
+        if name == "test":
+            sub.add_argument("--suite", required=True, help="显式 YAML 文件路径（相对当前调用目录）")
     for name in ("build", "flash", "connect", "reset", "monitor", "test", "run", "report"):
         sub = commands.add_parser(name)
         common(sub)
@@ -50,6 +75,16 @@ def parser():
         if name == "report":
             sub.add_argument("--run-id", required=True)
     return root
+
+
+def ble_common(parser):
+    for flag, options in (
+        ("--config", {}), ("--json", {"action": "store_true"}),
+        ("--dry-run", {"action": "store_true"}), ("--verbose", {"action": "store_true"}),
+        ("--timeout", {"type": float, "help": "仅覆盖运行总预算，不替换局部超时"}),
+        ("--backend", {"choices": ("fake", "bleak")}), ("--device", {}),
+    ):
+        parser.add_argument(flag, default=argparse.SUPPRESS, **options)
 
 
 def report(config_path, run_id):
@@ -68,10 +103,15 @@ def report(config_path, run_id):
 def main(argv=None):
     args = parser().parse_args(argv)
     operation = "device check" if args.command == "device" else args.command
+    if args.command == "ble":
+        operation = f"ble {args.ble_command}"
     config_path = Path(getattr(args, "config", "configs/app.yaml")).resolve()
     try:
         if operation == "report":
             result = report(config_path, args.run_id)
+        elif args.command == "ble":
+            from .application.ble_workflow import execute_ble
+            result = execute_ble(args, config_path).to_dict()
         else:
             target = getattr(args, "target", None)
             if not target:
@@ -92,7 +132,7 @@ def main(argv=None):
                 suite = load_yaml(suite_path.resolve())
             if hasattr(args, "duration"):
                 number(args.duration, "duration", 0.001)
-            from .services.workflow_engine import WorkflowEngine
+            from .application.workflow_engine import WorkflowEngine
             result = WorkflowEngine().execute(
                 config, operation, suite=suite,
                 artifact=getattr(args, "artifact", None), manifest_path=getattr(args, "manifest", None),
@@ -108,7 +148,14 @@ def main(argv=None):
         # ASCII JSON 可跨 Windows 控制台代码页传输，文件归档仍使用 UTF-8。
         print(json.dumps(result, ensure_ascii=True))
     else:
-        print(f"{'PASS' if result['success'] else 'FAIL'} {operation}: {result['message']}")
+        if args.command == "ble" or (args.command == "report" and str(result.get("operation", "")).startswith("ble ")):
+            mode = "模拟" if result.get("data", {}).get("simulated") else "真实后端（未实机验收）"
+            verdict = result.get("data", {}).get("verdict", "NOT_EVALUATED")
+            status = "计划生成" if result.get("data", {}).get("dry_run") else "操作完成"
+            detail = f": {result['message']}" if not result["success"] else ""
+            print(f"{status if result['success'] else '操作失败'} {operation}；断言 {verdict}；{mode}{detail}")
+        else:
+            print(f"{'PASS' if result['success'] else 'FAIL'} {operation}: {result['message']}")
         if result.get("error_code"):
             print(f"错误码: {result['error_code']}")
         if result.get("run_id"):

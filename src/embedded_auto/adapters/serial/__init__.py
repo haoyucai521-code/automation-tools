@@ -9,3 +9,11 @@ def create_serial(**kwargs):
     import serial
 
     return serial.Serial(**kwargs)
+
+
+def list_ports():
+    """只枚举端口，不打开端口；结果结构保持原检查命令契约。"""
+    from serial.tools import list_ports as ports
+
+    return [{"device": p.device, "description": p.description, "hwid": p.hwid}
+            for p in ports.comports()]

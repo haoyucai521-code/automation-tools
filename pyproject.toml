@@ -9,6 +9,9 @@ description = "可审计的本地嵌入式构建、烧录与协议测试工具"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0,<7", "pyserial>=3.5,<4"]
 
+[project.optional-dependencies]
+ble = ["bleak==3.0.2"]
+
 [project.scripts]
 embedded-auto = "embedded_auto.cli:main"
 

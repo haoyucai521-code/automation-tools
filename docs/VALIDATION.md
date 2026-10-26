@@ -1,6 +1,6 @@
 # 验收与实机记录
 
-截至 2026-10-23。本文是当前验证状态的集中入口；操作步骤见 [使用指南](USER_GUIDE.md)，架构见 [项目设计](design/PROJECT_DESIGN.md)。区分用户确认、自动化/Fake 测试、单板单次实测和连续稳定性，不把一项通过推广为全部支持。
+截至 2026-10-26。本文是当前验证状态的集中入口；操作步骤见 [使用指南](USER_GUIDE.md)，架构见 [项目设计](design/PROJECT_DESIGN.md)。区分用户确认、自动化/Fake 测试、单板单次实测和连续稳定性，不把一项通过推广为全部支持。
 
 ## 当前结论与支持矩阵
 
@@ -13,6 +13,8 @@
 | STM32F070 + IAR/GCC | 后端 Fake 测试通过；真实固件未验收 | 本工具尚无该型号实测 | 同上 |
 | APM32E030 R157H 显示板 + 用户 BIN | 未执行构建，不知道 BIN 的完整可重建环境 | 极性、共线日志、连接、单次写入校验和后续全片擦除流程通过 | 一次性校准调用底层适配器；无伪造构建清单 |
 | 正式 `run` + Fake 硬件 | 真实子进程合成构建通过 | Fake 启动/协议/清理通过 | 不能当作真实板卡端到端通过 |
+| BLE + Fake profile | 不涉及固件构建 | 扫描、发现、读写、通知、套件及归档为模拟验证 | 不连接 Windows 蓝牙；不证明设备协议或写通知因果关系 |
+| BLE + Bleak 适配器 | 不涉及固件构建 | 仅注入 Mock 的公开 API 契约通过 | 本机依赖版本不符；D6 实机验收未开始，不声称 Windows 蓝牙通过 |
 | Agent 有限修复 | 回调、保护/上限/停止策略测试通过 | 未做真实已知 Bug 修复闭环 | 工具不调用模型，不替代宿主授权 |
 
 APM32 共用 STM32 烧录方式是用户已确认实践，本机也已完成上述显示板试验；不把它写成厂商官方支持认证，也不因 CLI 显示 STM32 名称否定已通过的当前流程。
@@ -23,6 +25,12 @@ APM32 共用 STM32 烧录方式是用户已确认实践，本机也已完成上�
 - 加入全片擦除后为 **101 项 unittest 通过**；原日志为 `runs/verification_mass_erase_2026-10-23.txt`（17.130 秒）。文档整合前基线复测同样 101 项通过（14.937 秒），未执行硬件操作。
 - 本次文档整合不改运行代码，仅更新三份目标模板的说明链接；整合后 27 项工作流/CLI/配置/修复测试通过（2.983 秒），三目标 dry-run 仍安全阻塞，6 份日常文档的 70 个本地链接/锚点全部有效。没有因此再次操作实机。
 - 2026-10-26 清理与启动匹配可靠性修复后，独立复测 **112 项 unittest 通过**（20.584 秒），原始日志为 `runs/verification_reliability_review_2026-10-26.txt`；12 项新增/受影响回归连续 5 轮通过，忙碌串流用例本轮累计 50 次通过，原始日志为 `runs/verification_reliability_stress_2026-10-26.txt`。完整套件中的真实 ARM GCC 仍仅编译合成 Cortex-M0；新增故障注入均为 Fake，未操作实机。
+- 2026-10-26 行为保持的结构拆分：修改前执行 `python -m unittest discover -s tests -v`，**112 项通过**（20.918 秒），原始日志 `runs/verification_structure_baseline_2026-10-26.txt`；迁移后原 112 项再次全部通过（21.184 秒），日志 `runs/verification_structure_migration_2026-10-26.txt`。原测试及预期均未修改。
+- 结构拆分最终完整回归同一命令 **132 项通过**（23.945 秒，无跳过），日志 `runs/verification_structure_complete_2026-10-26.txt`；新增 20 项在 [test_structure.py](../tests/test_structure.py)，覆盖无 target/build/serial 的运行身份和归档、固件旧 run_id/摘要、显式 Git 快照、配置顺序/路径/副本语义、旧接口对象身份及不同导入顺序、独立进程领域隔离、实际 AST 依赖方向和默认后端注入。原有清理及 Windows spawn 正则回归保持通过，真实 ARM GCC 项仍仅编译合成 Cortex-M0。
+- 结构核对证据 `runs/verification_structure_equivalence_2026-10-26.txt`：迁移方法除构造注入及构建后端选择外保持 AST 一致；8 个基础/配置加载函数、4 段拆出的领域校验分支与旧实现 AST 一致。规范领域不导入对方、应用或 adapters，core 源码不反向导入；旧名称按需在包边界解析，不使普通 core/领域导入加载其他领域。
+- 打包发现规则及依赖未改，新增包已用 `python -m pip wheel . --no-deps --no-build-isolation --wheel-dir runs/structure_wheel_2026-10-26` 验证：wheel 精确包含当前 **48 个 Python 模块**，CLI entry point 不变，展开 wheel 后的隔离进程新/旧入口导入及 dry-plan 通过。记录 `runs/verification_structure_package_2026-10-26.txt`；未安装或升级依赖。`git diff --check` 通过。本轮仅软件/Fake/合成编译和包验证，没有串口打开、复位、实机连接/烧录，也没有 BLE 实现或硬件验收。
+- 2026-10-26 BLE D0–D5：实现前基线 **132 项通过**（23.856 秒），日志 `runs/verification_ble_baseline_20261026_154206.txt`。最终 `python -m unittest discover -s tests -v` 为 **255 项通过，0 失败，0 错误，31.060 秒**，日志 `runs/verification_ble_final_20261026_161725.txt`；其中 BLE 定向 123 项（领域 50、适配器 36、工作流/CLI 37），包含容量释放、窗口过期、早到通知、溢出/日志失败、三层判定、总超时优先级、扫描清理并发及领域/core 导入边界回归。所有 BLE 执行均为 Fake/Mock，没有真实扫描、连接、订阅或写入。
+- BLE 示例从 wheel 展开的目录以 `python -I` 隔离运行，`ble test` 返回 success=true、verdict=PASS、simulated=true；run_id 为 `20261026T081359193756Z_ble_test_f9bcc656`。wheel 精确包含当前 **59 个 Python 模块**、原 CLI entry point 和 `bleak==3.0.2` 可选 extra，记录 `runs/ble_wheel_20261026_160744/build.txt` 与 `package_verification.json`。本机实际为 Python 3.12.2、Windows 11 build 26200、Bleak 2.0.0；未安装或升级依赖，真实后端在版本不符时预检失败，不自动回退 Fake。D6 实机验收仍待 BLE 外设、UUID 规格和明确硬件授权。
 - 回归覆盖：命令构造、旧产物/篡改/越界、固定地址、全擦失败/取消阻止写入、CRLF、进程树回收、串口排他/关闭重试/RTS 释放、原始日志和偏移、协议多断言、病态正则超时、CLI/report/dry-run、Agent 停止和保护文件检测。
 - 合成链路使用真实子进程及 Fake 串口/烧录器；真实 GCC 集成测试只编译合成 Cortex-M0 文件并 objcopy，不烧板。工具缺失时该项可跳过，不能将跳过表述为编译成功。
 - 本机最初检查环境：Python 3.12.2、PySerial 3.5、PyYAML 6.0.3；`python3` 不可用，使用 `python`。2026-10-21 无可见串口，2026-10-23 已识别 COM7，不再沿用“尚无串口”作为当前结论。

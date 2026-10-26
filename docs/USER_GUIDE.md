@@ -4,7 +4,7 @@
 
 ## 命令与返回
 
-所有命令支持 `--config`（默认 `configs/app.yaml`）、`--target`、`--json`、`--timeout`（整个操作秒数）、`--dry-run`、`--verbose`、`--port`、`--baudrate`；公共选项可放在子命令前后。`--config` 指全局 YAML，目标从同目录 `targets/<target>.yaml` 加载。`report` 不需要 target。
+原有固件/串口命令支持 `--config`（默认 `configs/app.yaml`）、`--target`、`--json`、`--timeout`（整个操作秒数）、`--dry-run`、`--verbose`、`--port`、`--baudrate`；公共选项可放在子命令前后。`--config` 指全局 YAML，目标从同目录 `targets/<target>.yaml` 加载。`report` 不需要 target。BLE 使用独立子命令及公共选项，不接受也不构造 MCU target。
 
 | 命令 | 行为 | 额外参数 |
 | --- | --- | --- |
@@ -26,6 +26,29 @@ embedded-auto run --target stm32f030 --suite example_protocol --dry-run --json
 `--dry-run` 保存计划，不编译、不打开串口、不连接、不擦除。退出成功只证明计划生成；必须查看 `data.ready_for_execution`、`blocking_issues`，也不能据此证明实物或产物可用。`device check` 是无侵入检查，不代替硬件验收。
 
 退出码 0 为命令定义下成功，1 为操作失败，2 为参数语法错误。JSON 最终字段为 `success/operation/error_code/message/duration_ms/run_id/log_path/data`；服务详细结果位于 `data`，总目录为 `data.run_path`。`report` 返回原结果和原成功状态，不重新验证。模型摘要、终端 PASS 不能替代这些字段和原始证据。
+
+## BLE UUID 读写与通知
+
+当前 D0–D5 已实现 Fake 离线闭环、Bleak 薄适配、六命令及归档；D6 真实外设验收仍待设备与 UUID 规格。示例 [配置](../configs/ble/demo.yaml)、[外设 profile](../configs/ble/profiles/demo.yaml) 和 [套件](../configs/ble/suites/demo.yaml) 均可复制修改，UUID 必须写完整 128 位格式。
+
+```powershell
+embedded-auto ble scan --config configs/ble/demo.yaml --json
+embedded-auto ble inspect --config configs/ble/demo.yaml --json
+embedded-auto ble read --config configs/ble/demo.yaml --service 12345678-1234-5678-1234-56789abc0000 --characteristic 12345678-1234-5678-1234-56789abc0001 --expect-hex "01 00" --json
+embedded-auto ble write --config configs/ble/demo.yaml --service 12345678-1234-5678-1234-56789abc0000 --characteristic 12345678-1234-5678-1234-56789abc0001 --hex "A5 5A" --write-mode with-response --allow-write --json
+embedded-auto ble notify --config configs/ble/demo.yaml --service 12345678-1234-5678-1234-56789abc0000 --characteristic 12345678-1234-5678-1234-56789abc0001 --duration 2 --json
+embedded-auto ble test --config configs/ble/demo.yaml --suite configs/ble/suites/demo.yaml --allow-write --json
+```
+
+- `app.workspace` 和通用 report 均相对配置文件目录，默认 `..`；`runs_dir` 相对 workspace，默认 `runs`。示例显式配置 `../..`。`fake_profile` 相对配置文件目录，`--suite` 相对调用目录，不支持 suite ID 搜索。
+- `--backend fake|bleak` 和 `--device` 覆盖配置；连接命令必须有明确设备。真实设备仅接受本轮扫描返回的完整 MAC，配置和地址规范化为大写；Fake 为 `fake:demo`。同名候选不能作为连接标识。
+- `--timeout` 仅覆盖总运行预算。`scan/connect/operation/cleanup` 各有独立局部配置，scan 的采样窗口不是 API 超时；通知窗口无匹配为断言失败，不是操作超时。
+- read/notify 可用 `--expect-hex`；notify 还支持 suite 中的 `equals_hex / contains_hex / length` 多规则。无预期表示操作完成、`NOT_EVALUATED`，不能显示断言 PASS。空预期不会把“没有通知”判成空 payload。
+- 所有写操作每次调用都必须给 `--allow-write`。真实写还要 `--confirm-device` 与配置设备完全一致。只提交一次，按显式 response 调用；不自动重发、拆包、恢复、配对或清缓存。写完成只表示提交/ATT 响应范围，不是业务确认。
+- `test` 在首次扫描前完整预检，在发现后统一检查所有 UUID 和声明属性；首例 FAIL/ERROR 停止，后续 case 为 SKIP。suite 中 `subscribe → checkpoint → write → wait_notification` 明确事件窗口；普通 notify 的入口 checkpoint 在 `start_notify` 前。通知 PASS 只证明单条回调在窗口内匹配，不证明与写入有因果关系。
+- `--dry-run` 只生成计划，不构造后端或执行 Fake，配置/授权问题列入 `blocking_issues`，verdict 仍为 NOT_EVALUATED。真实后端要求 Python 3.11+ 和 `bleak==3.0.2`（`python -m pip install -e ".[ble]"`）；缺依赖或版本不符报 `BLE_DEPENDENCY_MISSING`，不自动安装或回退。本机已安装版本不符时保持原版本，不擅自升级。
+- 归档包括 `run_config.yaml / run_summary.json / agent_summary.md / events.jsonl / ble_events.jsonl / ble_assertions.json`；test 另有 profile/suite 快照。`success` 表示整体操作，data.verdict 表示断言；全部断言 PASS 后清理失败仍是整体失败。溢出、日志缺失和未归档数据不会声称证据完整。
+- 订阅本身会改变远端通知状态，并非无作用观察。以上真实命令仅为语法示例，当前没有真实 BLE 外设验收；实际扫描、连接、订阅或写入仍需对应硬件与操作授权。
 
 ## 配置与工程
 

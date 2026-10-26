@@ -1,0 +1,29 @@
+version: 1
+characteristics:
+  echo:
+    service_uuid: "12345678-1234-5678-1234-56789abc0000"
+    uuid: "12345678-1234-5678-1234-56789abc0001"
+    required_properties: [read, write, notify]
+tests:
+  - name: "echo_read_write_notify"
+    steps:
+      - action: read
+        characteristic: echo
+        expect: {equals_hex: "01 00", length: 2}
+      - action: subscribe
+        characteristic: echo
+      - action: checkpoint
+        id: before_write
+        characteristic: echo
+      - action: write
+        characteristic: echo
+        hex: "A5 5A"
+        response: true
+      - action: wait_notification
+        characteristic: echo
+        after: before_write
+        timeout_s: 2
+        expect: {equals_hex: "A5 5A", length: 2}
+      - action: read
+        characteristic: echo
+        expect: {equals_hex: "A5 5A", length: 2}

@@ -172,6 +172,7 @@ ctx = RunContext(
 公共参数：`--config / --backend fake|bleak / --device / --timeout / --json / --dry-run`；scan 使用 `--scan-timeout` 和可选 `--name`。read/write/notify 使用 `--service`、`--characteristic`；write 增加 `--hex`、`--write-mode with-response|without-response`、`--allow-write`，真实写增加 `--confirm-device`。read/notify 可给 `--expect-hex`；notify 的 `--duration` 是采集上限，test 使用 `--suite` 显式文件路径。
 
 - `--backend` 覆盖配置，未指定时取配置值；示例配置为 fake。缺依赖或真实设备时不得回退 Fake。
+- `--timeout` 只覆盖本次运行的总执行预算，未提供时取 `app.default_timeout_s`；不替换 scan/connect/operation/cleanup 的局部配置。各阶段的时限、正常窗口结束与超时错误按第 8.2 节区分。
 - 在固件 `--target` 检查和固件配置加载之前分派 BLE；不能要求 BLE 填写 MCU 参数。
 - BLE 文本显示“操作完成 / 断言 PASS/FAIL/NOT_EVALUATED / 模拟或真实”；JSON 顶层字段不改变。
 - `--dry-run` 只解析与生成执行计划，不构造 Bleak 客户端、不扫描、不连接、不写、不订阅，也不实际跑 Fake；授权和配置问题列入 blocking_issues。计划生成成功不是断言通过。
@@ -272,7 +273,7 @@ tests:
 - 全部步骤和别名必须在第一次扫描前完成语法预检；每例至少一个非空 expect。不存在的别名、未知 action/rule、重复 checkpoint ID、引用尚未建立或来自其他特征的 checkpoint 都报 CONFIG_INVALID。
 - 初次发现后统一检查整个 suite 所需特征和声明属性；发现不满足预期时 FAIL，后续写入不发生。读写操作还要做自身能力检查，不能只信配置。
 - UUID 以 service+characteristic 二元组定位；不同服务的同 UUID 可区分。若仍有重复服务实例/重复特征，MVP 报歧义而不选第一个；inspect 保留句柄作诊断，跨连接句柄定位后置。
-- `subscribe` 必须先于该特征的 checkpoint/wait；步骤均有 operation_timeout，wait 可设置更短的局部 timeout；全部受运行总截止时间限制。
+- `subscribe` 必须先于该特征的 checkpoint/wait；读、写、发现和订阅调用使用 `operation_timeout_s`。`wait_notification` 未指定 timeout_s 时取该默认值，显式值必须大于 0 且不大于该默认值；其局部窗口无匹配是断言 FAIL，不是 BLE_OPERATION_TIMEOUT。所有执行阶段仍受运行总截止时间限制，具体映射见第 8.2 节。
 - `response` 必须是布尔值；写 hex 非空。`contains_hex` 预期非空，`length` 为非负整数；`equals_hex` 可显式期望空数据。空 read 可以匹配明确空预期，但**没有通知事件**不能因 length=0 或空 equals_hex 而通过。
 - 多规则全部满足才 PASS；通知规则针对同一条 callback payload，不拼接多条事件来凑出成功数据。
 - 首例失败停止，所有已建立订阅由 finally 清理。该套件验证了模拟数据与窗口匹配，不证明写入和通知的严格因果关系。
@@ -302,8 +303,16 @@ embedded-auto ble test --config configs/ble/demo.yaml --suite configs/ble/suites
 
 | 配置 | 限制对象 | 满时行为 |
 | --- | --- | --- |
-| `ingress_limits` | 已进入工具、尚未被消费者归档处理的通知队列；分别累计事件数和 payload 字节数 | 不阻塞回调、不无声丢弃；设置粘滞错误 BLE_EVENT_OVERFLOW，记录拒收计数并让本轮失败 |
-| `window_limits` | 已消费后保留、供 wait 查询的内存事件窗口；独立累计数量和字节数 | 可淘汰最旧事件；被查询 checkpoint 已过期时显式 BLE_WINDOW_EXPIRED，不能只在剩余事件中找匹配并报 PASS |
+| `ingress_limits` | 通知入口队列的**当前在队占用**：current_events 与 current_payload_bytes，不是历史接收总量 | 在锁内原子检查数量和字节余量；不阻塞回调、不无声丢弃；不能容纳时拒收整个事件，设置粘滞错误 BLE_EVENT_OVERFLOW，记录拒收计数并让本轮失败 |
+| `window_limits` | 供 wait 查询的事件窗口的**当前驻留占用**；独立计数，不累计已淘汰历史 | 单条事件可容纳时，可先淘汰最旧事件释放余量再插入；被查询 checkpoint 已过期时显式 BLE_WINDOW_EXPIRED，不能只在剩余事件中找匹配并报 PASS |
+
+容量账本与生命周期必须一致：
+
+- 入口入队同时增加事件数与 `len(payload)` 字节数；事件被成功移交消费者时同步扣减，不能等到本轮结束才恢复容量。消费者处理中、但已出队的事件不再计入入口队列；后续进入窗口时使用窗口的独立账本。
+- 窗口插入增加当前驻留计数；每次淘汰、显式移除或清空都同步扣减。入队/出队、淘汰/插入及其计数在对应同步边界内完成，不允许并发检查后重复使用同一余量。
+- 单条 payload 超过任一目标容器的字节容量时，在入口预检即原子拒收；不先入队、归档或插入窗口再报告超限，也不为不可能容纳的事件先清空窗口。数量或字节任一不满足就拒收整个事件，不留下半条事件或半次计数。
+- 清理只释放该容器仍持有的事件；重复 close、取消与出队竞争不得重复扣减。计数不能为负，成功清空后两个当前计数均为 0；清理未完成则记录实际残留，不能强行把计数置 0 宣称已释放。
+- 历史 accepted_total/rejected_total 如需统计，应与当前容量计数分开。消费或淘汰后可以继续容纳新事件，但已经产生的粘滞溢出错误不会因此清除，本轮仍失败；也不能恢复已过期 checkpoint 的有效性。
 
 无界列表、无界 async queue 和“只保留最后一条通知”都不接受。示例数值是初始安全预算，不是性能指标。上限与内存计数需同时覆盖单条超大 payload；不能仅限制数量。
 
@@ -322,6 +331,8 @@ embedded-auto ble test --config configs/ble/demo.yaml --suite configs/ble/suites
 
 ## 8. 结果、错误和退出码：闭合映射
 
+### 8.1 判定与退出码
+
 不再引入独立的 `execution_status`。保留现有 `OperationResult` 顶层结构；新增内容只放 data：
 
 ```text
@@ -332,7 +343,7 @@ data:
   device, cases, cleanup, evidence_paths, evidence_complete
 ```
 
-步骤 `status` 只表示 `COMPLETED / ERROR / SKIP`，步骤的 `verdict` 表示断言结果。断言 FAIL 也是“已完成判定”，不再混成执行异常。
+步骤和 case 的 `status` 均只表示 `COMPLETED / ERROR / SKIP`，各自的 `verdict` 表示断言结果。断言 FAIL 也是“已完成判定”，不再混成执行异常；case 在断言 FAIL 处停止记 COMPLETED/FAIL，在操作错误处停止记 ERROR/NOT_EVALUATED，尚未进入的 case 记 SKIP/NOT_EVALUATED。已完成步骤的判定保留，不因后续步骤错误被改写。
 
 | 实际结果 | 步骤 status / verdict | 顶层 success / error_code / 退出码 |
 | --- | --- | --- |
@@ -343,6 +354,7 @@ data:
 | suite 声明的必需 UUID/属性在发现后不满足 | COMPLETED / FAIL | false / BLE_ASSERTION_FAILED / 1；未开始写入 |
 | 本地属性不支持所请求操作，或选择歧义 | ERROR / NOT_EVALUATED | false / 对应能力/歧义错误 / 1 |
 | 缺依赖、扫描/连接异常、远端拒绝、意外断连、日志/队列故障 | ERROR / NOT_EVALUATED | false / 对应操作错误 / 1 |
+| scan 控制、connect、discover、read、write 或 subscribe 局部调用超时，运行总截止尚未到达 | ERROR / NOT_EVALUATED | false / BLE_OPERATION_TIMEOUT / 1；data 中记录 stage 与局部时限 |
 | 总超时或用户取消 | ERROR / NOT_EVALUATED | false / WORKFLOW_TIMEOUT 或 CANCELLED / 1 |
 | 已完成的断言全 PASS，但清理失败 | 保留原步骤及 PASS | false / CLEANUP_FAILED / 1；data.verdict 可保留 PASS |
 | 已有 FAIL/ERROR，随后清理也失败 | 保留原判定；后续 SKIP | false / 保留原主错误 / 1，另附 cleanup |
@@ -350,13 +362,45 @@ data:
 | dry-run 计划已生成，未执行任何测试 | 无执行步骤 / NOT_EVALUATED | true / null / 0；data.dry_run=true，不是 suite PASS |
 | 配置/套件预检失败 | 不执行 / NOT_EVALUATED | false / CONFIG_INVALID / 1；argparse 语法错误为 2 |
 
-汇总规则：任一已评估断言 FAIL 则汇总 FAIL；否则只有**所有必需断言均已执行且通过**才为 PASS；缺步骤/断言未执行则为 NOT_EVALUATED。断言全通过但清理失败可以 verdict=PASS、success=false，两者不可互相替代。`success` 仍是自动化调用方判断该命令整体成功的字段。
+汇总规则在步骤、case 和套件三层保持一致：任一已评估断言 FAIL 则该层汇总 FAIL；否则只有**所有必需 case/步骤无 ERROR 或 SKIP，且必需断言均已执行并通过**才为 PASS；操作错误或必需步骤/断言未执行则为 NOT_EVALUATED。全部 case 已通过后发生的清理错误属于 case 之外的运行失败，可以保留 verdict=PASS、success=false，两者不可互相替代。`success` 仍是自动化调用方判断该命令整体成功的字段。
+
+- `PASS → FAIL → SKIP`：前一 case 及其步骤保留 PASS，第二 case 为 COMPLETED/FAIL，后续 case 为 SKIP/NOT_EVALUATED；套件 verdict=FAIL，主错误 BLE_ASSERTION_FAILED。
+- `PASS → ERROR → SKIP`：前一 case 保留 PASS，第二 case 为 ERROR/NOT_EVALUATED，后续 case 为 SKIP/NOT_EVALUATED；套件 verdict=NOT_EVALUATED，主错误保留实际操作错误，不能因为已有 PASS 就汇总通过。
+- 全部 PASS 后清理失败：已通过的 case/步骤不改为 ERROR，套件断言仍 PASS；顶层 success=false、CLEANUP_FAILED、退出 1。
 
 MVP **不支持 `expect_error`**。远端拒绝即 ERROR，不能被当作负向测试 PASS；本地属性阻止、缺依赖和断连更不能伪装为远端拒绝。未来增加负向断言，必须另行定义错误来源、可匹配范围和状态转换表后再扩展 schema。
 
 拟定错误目录在 D1 冻结：沿用 CONFIG_INVALID、WORKFLOW_TIMEOUT、CANCELLED、CLEANUP_FAILED、LOG_WRITE_FAILED、INTERNAL_ERROR；新增 BLE_DEPENDENCY_MISSING、BLE_DEVICE_NOT_FOUND、BLE_DEVICE_AMBIGUOUS、BLE_CONNECT_FAILED、BLE_GATT_FAILED、BLE_CHARACTERISTIC_NOT_FOUND、BLE_CHARACTERISTIC_AMBIGUOUS、BLE_CAPABILITY_UNSUPPORTED、BLE_REMOTE_REJECTED、BLE_DISCONNECTED、BLE_OPERATION_TIMEOUT、BLE_EVENT_OVERFLOW、BLE_WINDOW_EXPIRED、BLE_ASSERTION_FAILED、BLE_SUITE_NOT_EXECUTED。
 
 适配器保留原异常类型及可获取的平台/ATT 状态；只有可靠的远端拒绝证据才归类 BLE_REMOTE_REJECTED，不按模糊英文关键字猜测。本轮不修改实际 ERROR_CODES。
+
+### 8.2 分阶段超时与优先级
+
+运行开始时建立唯一的 monotonic 总截止时间；每个局部阶段另外建立自身截止时间，实际等待不得越过两者较早值。局部默认值不随 `--timeout` 被统一替换，也不为每一步重置运行总预算。
+
+| 阶段 | 局部预算/正常结束 | 局部时限到达且总截止未到时的映射 |
+| --- | --- | --- |
+| scan 采样 | `--scan-timeout` 覆盖 `ble.scan_timeout_s`，仅表示采集窗口；窗口届满是正常完成 | `scan` 可成功返回空列表；需要目标的后续操作无匹配时为 BLE_DEVICE_NOT_FOUND，不是调用超时 |
+| scanner start/stop 控制调用 | 各使用 `ble.operation_timeout_s`，不把采集窗口长度直接当成整次 API 的 await 超时 | BLE_OPERATION_TIMEOUT，stage=scan_start 或 scan_stop；正常执行阶段的 stop 超时仍会进入 finally 尝试收束 |
+| connect | `ble.connect_timeout_s` | BLE_OPERATION_TIMEOUT，stage=connect；非超时连接失败仍按 BLE_CONNECT_FAILED 等实际原因映射 |
+| discover | `ble.operation_timeout_s` | BLE_OPERATION_TIMEOUT，stage=discover |
+| read | `ble.operation_timeout_s` | BLE_OPERATION_TIMEOUT，stage=read；不是“读到了空值” |
+| write | `ble.operation_timeout_s` | BLE_OPERATION_TIMEOUT，stage=write；write_effect=unknown，禁止自动重发 |
+| subscribe | `ble.operation_timeout_s` | BLE_OPERATION_TIMEOUT，stage=subscribe；保留部分注册信息供清理 |
+| `wait_notification` | 步骤 timeout_s 或 `ble.operation_timeout_s` 默认窗口 | 无匹配为 BLE_ASSERTION_FAILED；不报 BLE_OPERATION_TIMEOUT，也不能把任务异常/断连伪装成无匹配 |
+| 普通 notify 采集 | `--duration` 表示采集/匹配窗口，不替换订阅调用的超时 | 无断言时窗口正常结束为 NOT_EVALUATED；有预期但整个窗口无匹配为 BLE_ASSERTION_FAILED |
+| finally 清理 | 独立的 `ble.cleanup_timeout_s`，从进入清理时计时，所有清理动作共用而非每项重置 | 清理项记录超时及 stage=cleanup；无主错误时顶层 CLEANUP_FAILED，有主错误时保留主错误并附 cleanup |
+
+`scan(timeout_s)` 接口中的 timeout_s 明确为采集窗口。正常 scan 可能包含 start、采集和 stop 三段，三段仍共同受运行总预算限制；不能把“采集了完整 scan_timeout_s 后正常返回”与等长外层超时赛跑，从而制造随机失败。
+
+同一轮失败判定按以下顺序选择主错误：
+
+1. 进入阶段前检查取消和总截止；若已经取消或总预算用尽，不再启动新 API 调用。
+2. 处理 await 完成/异常或等待窗口结束时，先检查明确的用户取消（CANCELLED），再检查运行总截止（WORKFLOW_TIMEOUT），之后才判断局部时限（BLE_OPERATION_TIMEOUT 或无匹配的 BLE_ASSERTION_FAILED）。同次判定局部与总截止均到达时，**总截止优先**。
+3. 内部为执行超时而取消子任务不等于用户取消，不能仅凭 CancelledError 把局部/总超时映射成 CANCELLED。正常返回也要复核截止状态，不能在总超时后继续下一步或追认通过。
+4. 主错误一旦确定，后来进入清理或总截止继续推进都不覆盖它。例如已在总截止之前确定的局部超时，不会因清理期间总预算到达而改报 WORKFLOW_TIMEOUT。
+
+超时证据至少记录 stage、timeout_scope（local/run/cleanup）、使用的局部预算、适用的局部/总 monotonic 截止及作出判定的时间；只记录当时实际已建立的截止，未建立的字段省略。若多个截止已到达，还应保留各自状态和最终选择原因，不能仅从异常类名反推。
 
 ## 9. 证据与 Mock/真实适配约束
 
@@ -372,7 +416,23 @@ MVP **不支持 `expect_error`**。远端拒绝即 ERROR，不能被当作负向
 | `ble_test_report.json` | 单步输入、断言、实际事件引用、verdict、超时与 SKIP 原因 |
 | `run_summary.json`、`agent_summary.md` | 顶层结果、模式、判定、证据路径和清理状态 |
 
-原始事件至少含 run_id、backend、event_id、epoch、订阅 generation、service/characteristic UUID、方向/事件类型、UTC、monotonic_ns、payload_hex/length；通知另有 ingress_seq。摘要引用事件 ID，不只复制一句 PASS。
+原始事件采用公共字段加按类型条件字段，不能要求所有事件都有特征 UUID：
+
+- 公共必填：`run_id / backend / event_id / event_type / timestamp / monotonic_ns`。timestamp 为 UTC 展示时间，event_id 在本轮唯一；事件产生时还没有 RunContext 的早期预检错误不伪造 run_id 或 ble_events.jsonl。
+- 条件字段只在对应上下文已经存在时写入；不适用或尚未取得的字段统一省略，不用空字符串、全零 UUID、虚构 epoch/句柄或伪造空 payload 填满 schema。若字段按下表适用于该事件，则缺失属于证据 schema 错误。
+
+| 事件类型 | 条件必填字段 | 无对应上下文时的规则 |
+| --- | --- | --- |
+| scan 开始/结束、候选发现 | 已建立的 scan_id；候选事件带实际 candidate_id 和后端提供的设备标识 | 不要求 epoch、订阅、service_uuid 或 characteristic_uuid；未知名称/地址省略，不把名称伪造成地址 |
+| 连接尝试/成功/断开、服务发现 | 已选 candidate_id/设备标识；epoch 已分配则必须带原值 | 连接前或尚未定位特征时不要求特征 UUID；失败不能补造 GATT 快照 |
+| read 请求、write 请求、订阅/取消订阅 | 当前 epoch、service_uuid、characteristic_uuid；订阅相关事件另带已建立的 generation | write 请求必须有 direction=tx、payload_hex 和 length；read/订阅等没有应用数据 payload 的控制请求不伪造空 payload |
+| read 返回 | 当前 epoch、service_uuid、characteristic_uuid、direction=rx、payload_hex、length | 实际读回空 bytes 时才记录 payload_hex=""、length=0；读取失败改记错误事件，不当作空返回 |
+| 通知回调 | 当前或原始归属的 epoch、generation、service_uuid、characteristic_uuid、direction=rx、ingress_seq、payload_hex、length | 旧订阅/连接晚到事件保留其原归属及排除原因，不能改挂到当前会话 |
+| write 完成 | 当前 epoch、service_uuid、characteristic_uuid、request_event_id、write_mode、提交/确认范围 | 没有应用层响应 payload 时省略 payload_hex/length，不能把 API 正常返回伪装成收到了数据 |
+| 错误、取消、超时 | error_code、stage、message，以及当时已知的 scan_id/candidate_id/epoch/特征/订阅上下文；超时附第 8.2 节字段 | 尚未定位特征时允许完全没有 UUID；记录实际已知上下文，不为了报错反向创建会话或特征 |
+| 清理动作 | stage=cleanup、action、实际 status，以及当时已知的资源上下文；失败时才要求 error_code/message，超时另附时限 | 成功清理不伪造错误字段；清理尚未建立的资源时记录未建立/跳过，不编造 UUID 或订阅 |
+
+payload_hex 必须与 length 相符；有通知回调但 payload 长度为 0，与根本没有回调是两种不同证据。摘要及断言引用真实 event_id，不只复制一句 PASS，也不引用根本未生成的事件。
 
 仅按实际取得的数据生成证据：语法错误或连接失败时不伪造 GATT/数据文件；没有 suite 时可以不生成 test_report。hex 必须可还原原始 bytes，不用解码文本替代。日志可能含地址和设备数据，不自动提交或发送外部服务。
 
@@ -427,14 +487,26 @@ MVP **不支持 `expect_error`**。远端拒绝即 ERROR，不能被当作负向
 | N08 | 入口数量/字节/单事件超限 | 粘滞溢出失败，记录拒收计数，不声称证据完整 |
 | N09 | 窗口淘汰后查询旧 checkpoint | WINDOW_EXPIRED；磁盘原始事件不因内存淘汰截断 |
 | N10 | 订阅过程中部分失败及 start_notify 前后边界 | 已注册回调/资源有清理，初始事件有接收入口 |
+| N11 | 队列接近数量/字节容量，消费后再次入队 | 出队同步扣减当前占用，新事件可继续接收；历史接收量超过容量不等于当前溢出 |
+| N12 | 窗口淘汰后继续接收，以及单条事件超过任一容器字节上限 | 淘汰恢复数量/字节余量；超大事件在入口原子拒收，不先插入/归档、不为它清空窗口、不留下半次计数 |
+| N13 | 重复清理、出队与取消竞争、溢出后消费 | 每份所有权只扣减一次，计数不为负；成功清空为0，容量恢复不清除本轮粘滞错误或恢复过期checkpoint |
 | R01 | 操作正常但无断言 | success=true、NOT_EVALUATED，文本不称设备测试通过 |
 | R02 | 断言全通过且清理成功 | success=true、PASS；Fake 模拟标记不可省略 |
 | R03 | 断言 FAIL、后续步骤 | 退出1、保留实际数据，后续 SKIP |
 | R04 | 全部 SKIP、尚未执行任何断言 | 不能汇总 PASS；SUITE_NOT_EXECUTED 或明确原主错误 |
-| R05 | PASS 后 unsubscribe/disconnect 失败 | verdict 保留，整体 CLEANUP_FAILED/退出1 |
+| R05 | 多个 case 及步骤全部 PASS，之后 unsubscribe/disconnect 失败 | case/步骤的 COMPLETED/PASS 保留，套件 verdict=PASS；顶层 CLEANUP_FAILED/退出1 |
 | R06 | 主错与多个清理错同时出现 | 保留主错误，剩余清理仍执行，分别记录结果 |
 | R07 | 在 scan/connect/read/write/wait 及总截止取消 | 退出1、无无限等待、无遗留已登记任务 |
 | R08 | 事件落盘、flush 或最终归档失败 | 不返回成功；尽可能保留原错和证据路径 |
+| R09 | 多用例 PASS → FAIL → SKIP | 前一case/步骤保留PASS，第二case为COMPLETED/FAIL，后续case为SKIP/NOT_EVALUATED；套件FAIL、BLE_ASSERTION_FAILED/退出1 |
+| R10 | 多用例 PASS → ERROR → SKIP | 前一case/步骤保留PASS，第二case为ERROR/NOT_EVALUATED，后续SKIP；套件NOT_EVALUATED、实际主错误/退出1 |
+| T01 | scan控制、connect、discover、read、write、subscribe分别局部超时 | 均为BLE_OPERATION_TIMEOUT，stage与局部配置对应；总预算尚未到达，write另记未知写影响 |
+| T02 | 局部/总截止同次到达、显式用户取消、已确定主错后进入清理 | 同次取消优先于总截止，总截止优先于局部；既有主错不被后来截止覆盖，内部取消不误报用户取消 |
+| T03 | scan窗口正常到期、wait无匹配、通知任务异常 | scan正常完成可为空；wait无匹配为BLE_ASSERTION_FAILED；任务异常保留实际错误，不混为无匹配 |
+| T04 | 只修改--timeout，及总截止后进入清理 | 局部默认值不变、实际等待受总预算截断；清理独立共用预算且不逐项重置，不能跳过清理 |
+| E01 | 扫描开始、连接早期失败、特征尚未解析时的错误事件 | 公共字段完整；无UUID/epoch时省略，不填全零UUID、虚构句柄或空payload |
+| E02 | read/通知的真实空payload、非数据控制事件和字段缺失 | 真实空数据保留hex/length=0；无payload的事件不伪造数据；按类型缺必填或hex/length不一致会被发现 |
+| E03 | 特征已定位后的错误、超时及旧订阅晚到事件 | 带真实已知上下文/时限及原始归属，摘要引用实际event_id，不挂错会话 |
 
 ### 10.2 L2：集成、隔离与适配契约
 
@@ -447,7 +519,7 @@ MVP **不支持 `expect_error`**。远端拒绝即 ERROR，不能被当作负向
 | I05 | 六个 CLI 命令、JSON stdout、退出码、dry-run | 不要求 MCU target；JSON单对象；dry-run 对真实 API 调用0次 |
 | I06 | 通用 report 读取 Fake/真实标签的历史结果 | 不操作硬件；使用相同 runs_dir；保留原 success/verdict |
 | I07 | 同一事件循环、不同命令新循环及 Windows 环境 Mock | 资源不跨循环复用，不盲目绕过 COM 检查 |
-| I08 | wheel 内容、可选 extra、旧112+结构回归 | 新模块/入口被打包，原功能及旧 Python 入口预期不变 |
+| I08 | wheel 内容、可选 extra、原固件/串口全套回归及结构回归 | 新模块/入口被打包，原功能及旧 Python 入口预期不变；不绑定历史测试数量 |
 
 ### 10.3 L3/L4：有设备后才执行
 
@@ -469,7 +541,7 @@ MVP **不支持 `expect_error`**。远端拒绝即 ERROR，不能被当作负向
 | 阶段 | 工作与交付 | 退出条件 |
 | --- | --- | --- |
 | D0：重新立基线 | 核对当前结构/工作树，运行原全套测试，记录 Python/Windows 环境与实际原始日志 | 与现有用户工作隔离；不把历史132当作新跑结果；不操作硬件 |
-| D1：冻结契约 | 确定本方案配置/suite/接口/错误表、唯一设备选择、结果映射和容量边界 | 评审可逐行解释状态和授权；无 expect_error/数值DSL等隐含扩张 |
+| D1：冻结契约 | 确定配置/suite/接口/错误表、唯一设备选择及结果映射；冻结当前容量占用/释放、阶段超时优先级和分类型事件字段 | 评审可逐行解释三层判定、授权、超时和账本生命周期；无 expect_error/数值DSL等隐含扩张 |
 | D2：纯规则与 Fake 读闭环 | BLE 模型/接口、配置预检、独立 profile、scan/inspect/read 和原始事件 | 不安装 Bleak 即可演示；错误预期必失败；L0及相关L1通过 |
 | D3：写与通知核心 | 单次写授权、订阅、入口checkpoint、有界队列/窗口、取消清理 | 写返回前通知、旧事件、溢出及清理叠加故障有回归 |
 | D4：CLI/套件/归档 | 六命令、suite runner、RunContext和通用report集成 | Fake示例可运行，结果表无误报，旧CLI/原回归保持通过 |
@@ -526,7 +598,9 @@ git diff --check
 | 真实设备选择不明确 | 完整地址、本轮唯一新扫描对象、name仅过滤、显式写授权/地址确认、禁止旧candidate复用 |
 | checkpoint被当作因果证明 | 定义回调入口窗口与其局限；明确同值/延迟交付都不能证明写入导致 |
 | MVP范围过大 | 六命令+基础字节断言；复用report；草稿/简写/数值DSL/指示模式后置 |
-| max_events/max_payload_bytes含义混淆 | ingress_limits和window_limits独立配置、计数和故障语义 |
+| max_events/max_payload_bytes含义混淆 | ingress_limits和window_limits限制当前在队/驻留占用；出队/淘汰/清理同步释放，原子拒收及幂等扣减有回归 |
+| 局部超时与总截止映射未闭合 | 分阶段定义采集窗口/局部API/独立清理预算，同次判定总截止优先于局部，既有主错不被覆盖 |
+| 所有原始事件被要求带UUID | 公共字段与按类型条件必填分离，早期事件省略未知上下文，不伪造UUID或空payload |
 
 ## 14. 官方依据与需复核项
 

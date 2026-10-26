@@ -1,0 +1,19 @@
+version: 1
+app:
+  workspace: "../.."
+  runs_dir: "runs"
+  default_timeout_s: 30
+ble:
+  backend: fake
+  device: "fake:demo"
+  fake_profile: "profiles/demo.yaml"
+  scan_timeout_s: 3
+  connect_timeout_s: 5
+  operation_timeout_s: 2
+  cleanup_timeout_s: 5
+  ingress_limits:
+    max_events: 128
+    max_payload_bytes: 65536
+  window_limits:
+    max_events: 256
+    max_payload_bytes: 131072
