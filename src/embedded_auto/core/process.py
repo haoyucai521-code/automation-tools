@@ -70,10 +70,10 @@ class ProcessRunner:
         started = time.monotonic()
         started_at_ns = time.time_ns()
         process = None
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         base = {"command": command, "cwd": str(cwd), "log_path": str(log_path),
                 "started_at_ns": started_at_ns}
         try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             if not command or not all(isinstance(arg, str) and arg for arg in command):
                 raise ToolError("PROCESS_COMMAND_INVALID", "Command must be a nonempty list of strings")
             if not math.isfinite(float(timeout_s)) or timeout_s <= 0:
@@ -122,13 +122,9 @@ class ProcessRunner:
             if process is not None:
                 data.update(pid=process.pid, returncode=process.returncode)
             if cleanup_error is not None:
-                data.update(original_error=str(exc),
-                            original_error_code=getattr(exc, "code", type(exc).__name__),
-                            original_error_data=getattr(exc, "data", None),
-                            cleanup_error=str(cleanup_error),
+                data.update(cleanup_error=str(cleanup_error),
                             cleanup_error_data=getattr(cleanup_error, "data", None))
-                error = ToolError("PROCESS_CLEANUP_FAILED", "Child process cleanup failed", data)
-            elif isinstance(exc, ToolError):
+            if isinstance(exc, ToolError):
                 exc.data = {**(exc.data or {}), **data}
                 error = exc
             elif isinstance(exc, FileNotFoundError):
@@ -137,8 +133,11 @@ class ProcessRunner:
                 error = ToolError("CANCELLED", "Process interrupted", data)
             else:
                 error = ToolError("PROCESS_FAILED", str(exc), data)
-            with log_path.open("ab") as log:
-                log.write(("\n" + json.dumps({"error_code": error.code, "message": str(error),
-                                             "data": error.data}, ensure_ascii=False, default=str)
-                           + "\n").encode("utf-8"))
+            try:
+                with log_path.open("ab") as log:
+                    log.write(("\n" + json.dumps({"error_code": error.code, "message": str(error),
+                                                 "data": error.data}, ensure_ascii=False, default=str)
+                               + "\n").encode("utf-8"))
+            except OSError as log_error:
+                error.data["error_log_write_error"] = str(log_error)
             raise error from (None if error is exc else exc)

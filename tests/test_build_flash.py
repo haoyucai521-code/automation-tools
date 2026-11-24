@@ -129,7 +129,10 @@ class BuildFlashTests(unittest.TestCase):
                       "connect_success_pattern": r"^CONNECTED$", "write_success_pattern": r"^WRITTEN$",
                       "erase_success_pattern": r"^ERASED$",
                       "verify_success_pattern": r"^VERIFIED$", "cli_verified": True,
-                      "compatibility_verified": True},
+                      "compatibility_verified": True, "erase_policy": "mass_erase",
+                      "physical_flash_start": 0x08000000, "physical_flash_size": 0x20000,
+                      "physical_flash_source": "synthetic fixture", "cli_version": "fake-1",
+                      "required_cli_version": "fake-1", "cli_version_source": "synthetic fixture"},
             "reset": {"asserted_rts_value": False, "release_delay_ms": 10, "pulse_ms": 100},
         }
         self.counter = 0
@@ -151,6 +154,14 @@ class BuildFlashTests(unittest.TestCase):
         self.assertTrue(result.success, result.to_dict())
         return Path(result.data["artifact"]), result.data["manifest"], ctx
 
+    def authorization(self, manifest):
+        flash = self.config["flash"]
+        return {"target_id": self.config["target"]["id"],
+                "exact_part_number": self.config["target"]["exact_part_number"],
+                "sha256": manifest["sha256"], "address": flash["address"],
+                "erase_policy": "mass_erase", "erase_start": flash["physical_flash_start"],
+                "erase_size": flash["physical_flash_size"]}
+
     def flash(self, code="print('CONNECTED\\nWRITTEN\\nVERIFIED')", reset=None, connect_only=False,
               erase_code="print('CONNECTED\\nERASED')"):
         if connect_only:
@@ -160,7 +171,8 @@ class BuildFlashTests(unittest.TestCase):
         programmer = FakeProgrammer(code, erase_code)
         reset = reset if reset is not None else FakeReset()
         result = FlashService(programmer).flash(self.config, ctx, FakeSession(), reset,
-                                                image, manifest, connect_only=connect_only)
+                                                image, manifest, connect_only=connect_only,
+                                                authorization=self.authorization(manifest) if manifest else None)
         return result, ctx, reset, programmer
 
     def test_backend_commands_and_official_cube_arguments(self):
@@ -348,7 +360,7 @@ class BuildFlashTests(unittest.TestCase):
         marker = self.root / "write_started"
         programmer = FakeProgrammer(f"from pathlib import Path; Path({str(marker)!r}).touch()")
         result = FlashService(programmer, CancelAfterErase()).flash(
-            self.config, ctx, FakeSession(), FakeReset(), image, manifest)
+            self.config, ctx, FakeSession(), FakeReset(), image, manifest, authorization=self.authorization(manifest))
         self.assertEqual(result.error_code, "CANCELLED")
         self.assertTrue(result.data["erase"]["success"])
         self.assertFalse(marker.exists())
@@ -358,7 +370,8 @@ class BuildFlashTests(unittest.TestCase):
         self.config["flash"].update(address=0x08002000, region_size=0x10000)
         manifest["address"] = 0x08002000
         reset = FakeReset()
-        result = FlashService().flash(self.config, ctx, FakeSession(), reset, image, manifest)
+        result = FlashService().flash(self.config, ctx, FakeSession(), reset, image, manifest,
+                                      authorization=self.authorization(manifest))
         self.assertEqual(result.error_code, "FLASH_CONFIG_INVALID")
         self.assertFalse(reset.actions)
 
@@ -389,12 +402,14 @@ class BuildFlashTests(unittest.TestCase):
         self.assertEqual(reset.actions, [])
         self.config["flash"]["compatibility_verified"] = True
         self.config["target"]["status"] = "unverified"
-        result = service.flash(self.config, ctx, FakeSession(), reset, image, manifest)
+        result = service.flash(self.config, ctx, FakeSession(), reset, image, manifest,
+                               authorization=self.authorization(manifest))
         self.assertEqual(result.error_code, "FLASH_UNVERIFIED")
         self.assertEqual(reset.actions, [])
         self.config["target"]["status"] = "verified"
         self.config["flash"]["compatibility_verified"] = False
-        result = service.flash(self.config, ctx, FakeSession(), reset, image, manifest)
+        result = service.flash(self.config, ctx, FakeSession(), reset, image, manifest,
+                               authorization=self.authorization(manifest))
         self.assertEqual(result.error_code, "FLASH_UNVERIFIED")
         self.assertEqual(reset.actions, [])
 
@@ -540,9 +555,7 @@ class BuildFlashTests(unittest.TestCase):
             with self.assertRaises(ToolError) as error:
                 ProcessRunner().run([sys.executable, "-c", "import time; time.sleep(20)"],
                                     self.root, .2, ctx, ctx.path / "process.log")
-        self.assertEqual(error.exception.code, "PROCESS_CLEANUP_FAILED")
-        self.assertIn("original_error", error.exception.data)
-        self.assertEqual(error.exception.data["original_error_code"], "PROCESS_TIMEOUT")
+        self.assertEqual(error.exception.code, "PROCESS_TIMEOUT")
         self.assertIn("cleanup_error", error.exception.data)
         self.assertTrue(Path(error.exception.data["log_path"]).exists())
 

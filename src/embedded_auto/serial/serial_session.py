@@ -25,6 +25,9 @@ class SerialSession:
         self._buffer = bytearray()
         self._base = 0
         self._error = None
+        # 只记录 API 操作事实；事件归档和关闭后物理电平各自独立。
+        self.cleanup_facts = {'release_attempted': False, 'release_api_succeeded': None,
+                              'port_close_succeeded': None, 'physical_reset_state': 'UNKNOWN'}
         self._capacity = config['serial'].get('max_buffer_bytes', 1024 * 1024)
         if type(self._capacity) is not int or self._capacity <= 0:
             raise ToolError('CONFIG_INVALID', 'max_buffer_bytes must be positive')
@@ -76,13 +79,18 @@ class SerialSession:
                         # 句柄已打开时 close 前尽力把 RTS 恢复为已确认释放值；
                         # 不能用 set_rts（_stop 已置位会被拒绝），也不证明关闭后的物理电平。
                         try:
+                            self.cleanup_facts['release_attempted'] = True
+                            self.cleanup_facts['release_api_succeeded'] = False
                             self._port.rts = not self.config['reset']['asserted_rts_value']
+                            self.cleanup_facts['release_api_succeeded'] = True
                         except Exception as release_exc:
                             failures.append(f'rts release failed: {release_exc}')
                     try:
                         self._port.close()
+                        self.cleanup_facts['port_close_succeeded'] = True
                         self._port = None
                     except Exception as close_exc:
+                        self.cleanup_facts['port_close_succeeded'] = False
                         failures.append(f'close failed: {close_exc}')
                 if self._port is None:
                     self._release_owner()
@@ -177,12 +185,18 @@ class SerialSession:
 
     def set_rts(self, value: bool):
         with self._io:
+            releasing = value == (not self.config['reset']['asserted_rts_value'])
+            if releasing:
+                self.cleanup_facts['release_attempted'] = True
+                self.cleanup_facts['release_api_succeeded'] = False
             # Historical RX/log errors still block normal I/O, not physical
             # cleanup of NRST on a port whose handle is still usable.
             if self._port is None or self._stop.is_set() or not self._port.is_open:
                 raise ToolError('SERIAL_NOT_OPEN', 'Serial session is not open')
             try:
                 self._port.rts = bool(value)
+                if releasing:
+                    self.cleanup_facts['release_api_succeeded'] = True
             except Exception as exc:
                 error = ToolError('SERIAL_CONTROL_FAILED', str(exc))
                 self._fail(error)
@@ -259,8 +273,10 @@ class SerialSession:
             if self._port is not None:
                 try:
                     self._port.close()
+                    self.cleanup_facts['port_close_succeeded'] = True
                     self._port = None
                 except Exception as exc:
+                    self.cleanup_facts['port_close_succeeded'] = False
                     failures.append(str(exc))
             if self._thread is not None:
                 self._thread.join(0.5)

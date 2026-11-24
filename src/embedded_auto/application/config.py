@@ -6,6 +6,7 @@ from embedded_auto.core.config import integer, load_yaml, merge, number, pattern
 from embedded_auto.core.errors import ToolError
 from embedded_auto.core.paths import identifier, resolve_path
 from embedded_auto.firmware.config import validate_build_config, validate_layout_config, validate_programmer_config
+from embedded_auto.firmware.erase_policy import validate_erase_scope
 from embedded_auto.serial.config import validate_serial_config
 
 
@@ -64,8 +65,14 @@ def validate_config(config: dict, operation: str) -> None:
 
 
 def validation_issues(config: dict, operation: str) -> list[str]:
+    issues = []
     try:
         validate_config(copy.deepcopy(config), operation)
-        return []
     except ToolError as exc:
-        return [str(exc)]
+        issues.append(str(exc))
+    if operation in ("flash", "run"):
+        try:
+            validate_erase_scope(config)
+        except ToolError as exc:
+            issues.append(f"{exc.code}: {exc}")
+    return issues

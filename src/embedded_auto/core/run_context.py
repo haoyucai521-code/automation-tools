@@ -5,6 +5,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -91,19 +92,31 @@ class RunContext:
         write_json(destination / "git_state.json", metadata)
         return metadata
 
-    def finish(self, result: OperationResult):
+    def finish(self, result: OperationResult, *, on_summary_error: Callable[[OSError], None] | None = None):
         result.run_id = self.run_id
         result.duration_ms = int((time.monotonic() - self.started) * 1000)
         result.data.setdefault("run_path", str(self.path))
         result.data.setdefault("started_at", self.started_at)
         result.data["finished_at"] = utc_now()
+        evidence_line = f"- {self.evidence_hint}\n" if self.evidence_hint is not None else ""
+        summary = self.path / "agent_summary.md"
+        draft = summary.with_suffix(".md.tmp")
+        try:
+            draft.write_text(
+                f"# {self.operation}: {'PASS' if result.success else 'FAIL'}\n\n"
+                f"- run_id: {self.run_id}\n- error_code: {result.error_code or 'none'}\n"
+                f"- {result.message}\n- 完整证据目录: {self.path}\n"
+                f"{evidence_line}"
+                f"- 逐步结果和清理状态: run_summary.json / events.jsonl\n", encoding="utf-8")
+            draft.replace(summary)
+        except OSError as exc:
+            if on_summary_error is not None:
+                on_summary_error(exc)
+            else:
+                result.data["archive_error"] = str(exc)
+                if result.success:
+                    result.success, result.error_code, result.message = False, "ARCHIVE_FAILED", "运行摘要归档失败"
+        # report 读取的 JSON 最后发布，包含摘要写入失败，而不是留下旧的成功判定。
         self.event("ARCHIVE", success=result.success, error_code=result.error_code)
         write_json(self.path / "run_summary.json", result.to_dict())
-        evidence_line = f"- {self.evidence_hint}\n" if self.evidence_hint is not None else ""
-        (self.path / "agent_summary.md").write_text(
-            f"# {self.operation}: {'PASS' if result.success else 'FAIL'}\n\n"
-            f"- run_id: {self.run_id}\n- error_code: {result.error_code or 'none'}\n"
-            f"- {result.message}\n- 完整证据目录: {self.path}\n"
-            f"{evidence_line}"
-            f"- 逐步结果和清理状态: run_summary.json / events.jsonl\n", encoding="utf-8")
         return result

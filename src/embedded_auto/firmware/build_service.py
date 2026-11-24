@@ -28,13 +28,17 @@ def validate_artifact(image: Path, manifest: dict, config: dict) -> dict:
     image = Path(image)
     if not isinstance(manifest, dict) or not manifest:
         raise ToolError("ARTIFACT_MANIFEST_MISSING", "A build artifact manifest is required")
+    imported = manifest.get("source_type") == "external_import"
+    if manifest.get("source_type", "build") not in ("build", "external_import"):
+        raise ToolError("ARTIFACT_INVALID", "Unknown artifact source")
     required = ("run_id", "target_id", "exact_part_number", "address", "address_source",
-                "sha256", "size", "build_success", "source_path", "snapshot_path",
-                "build_started_at_ns", "build_finished_at_ns", "source_mtime_ns", "command")
+                "sha256", "size", "source_path", "snapshot_path")
+    required += (("imported_at", "source_description", "config_sources", "vector_check") if imported else
+                 ("build_success", "build_started_at_ns", "build_finished_at_ns", "source_mtime_ns", "command"))
     missing = [key for key in required if key not in manifest or manifest[key] is None]
     if missing:
         raise ToolError("ARTIFACT_INVALID", "Incomplete artifact metadata", {"missing": missing})
-    if manifest["build_success"] is not True:
+    if not imported and manifest["build_success"] is not True:
         raise ToolError("ARTIFACT_INVALID", "Manifest does not attest a successful build")
     target, flash = config["target"], config["flash"]
     if (not isinstance(target.get("id"), str) or not target["id"].strip() or
@@ -51,14 +55,15 @@ def validate_artifact(image: Path, manifest: dict, config: dict) -> dict:
         manifest["address_source"] != flash["address_source"]):
         raise ToolError("ARTIFACT_ADDRESS_MISMATCH", "Address provenance is missing or mismatched")
     if (not isinstance(manifest["run_id"], str) or not manifest["run_id"].strip() or
-        not isinstance(manifest["command"], list) or not manifest["command"] or
+        not isinstance(manifest["sha256"], str) or len(manifest["sha256"]) != 64 or
+        any(char not in "0123456789abcdef" for char in manifest["sha256"])):
+        raise ToolError("ARTIFACT_INVALID", "Invalid artifact identity/hash metadata")
+    if not imported and (not isinstance(manifest["command"], list) or not manifest["command"] or
         not all(isinstance(arg, str) and arg for arg in manifest["command"]) or
         not all(type(manifest[key]) is int and manifest[key] > 0 for key in
                 ("build_started_at_ns", "build_finished_at_ns", "source_mtime_ns")) or
-        manifest["build_finished_at_ns"] < manifest["build_started_at_ns"] or
-        not isinstance(manifest["sha256"], str) or len(manifest["sha256"]) != 64 or
-        any(char not in "0123456789abcdef" for char in manifest["sha256"])):
-        raise ToolError("ARTIFACT_INVALID", "Invalid build identity/timing/hash metadata")
+        manifest["build_finished_at_ns"] < manifest["build_started_at_ns"]):
+        raise ToolError("ARTIFACT_INVALID", "Invalid build timing/command metadata")
     for key in ("source_path", "snapshot_path"):
         if not isinstance(manifest[key], str) or not Path(manifest[key]).is_absolute():
             raise ToolError("ARTIFACT_INVALID", "Artifact paths must be absolute")
@@ -81,6 +86,9 @@ def validate_artifact(image: Path, manifest: dict, config: dict) -> dict:
         address < start or address + actual["size"] > start + size or
         address < 0 or address + actual["size"] > 2**32):
         raise ToolError("ARTIFACT_OUT_OF_RANGE", "BIN is outside the configured memory region")
+    if imported:
+        from .artifact_import import validate_import_metadata
+        validate_import_metadata(image, manifest, config)
     return {**manifest, "image": str(image.resolve()), "sha256": actual["sha256"], "size": actual["size"]}
 
 

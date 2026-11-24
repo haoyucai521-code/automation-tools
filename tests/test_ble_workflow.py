@@ -286,6 +286,23 @@ class BleWorkflowTests(unittest.TestCase):
         self.assertTrue(result.run_id)
         self.assertFalse(result.data["evidence_complete"])
 
+    def test_markdown_archive_failure_preserves_ble_error_contract(self):
+        config_path = self.root / "app.yaml"
+        config_path.write_text(yaml.safe_dump(self.config), encoding="utf-8")
+        write_text = Path.write_text
+
+        def fail_markdown(path, *args, **kwargs):
+            if path.name == "agent_summary.md.tmp":
+                raise OSError("controlled archive failure")
+            return write_text(path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fail_markdown):
+            result = self.run_ble("read", options={"expect_hex": "01 00"})
+        self.assertEqual(result.error_code, "LOG_WRITE_FAILED")
+        self.assertFalse(result.data["evidence_complete"])
+        self.assertEqual(result.data["verdict"], "PASS")
+        self.assertEqual(report(config_path, result.run_id), result.to_dict())
+
     def test_report_paths_and_archived_config_without_mcu_or_git_snapshot(self):
         result = self.run_ble("test", suite=self.suite, options={"allow_write": True})
         config_path = self.root / "app.yaml"

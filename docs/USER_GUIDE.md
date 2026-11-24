@@ -10,12 +10,14 @@
 | --- | --- | --- |
 | `device check` | 检查配置、工具和串口枚举，不打开端口 | 无 |
 | `build` | 构建，归档 BIN 快照和身份清单 | `--backend iar/gcc` 可选 |
+| `artifact import` | 非破坏性导入外部 BIN 快照 | `--file`、`--address`、`--source` 必需 |
+| `stability evaluate` | 离线检查重复运行记录，不操作硬件 | `--records` 指向 JSON 数组 |
 | `connect` | 仅复位辅助连接，不擦除、不写入 | 无 |
-| `flash` | 校验已有产物，全擦、写入、校验、脉冲复位 | `--artifact` 必需；`--manifest` 可选 |
+| `flash` | 校验已有产物，全擦、写入、校验、脉冲复位 | `--artifact` 必需；真实执行须 `--erase-authorization` |
 | `reset` | 普通脉冲复位 | 无 |
 | `monitor` | 定时采集串口证据，不主动发送数据 | `--duration` 默认 30 秒 |
 | `test` | 对当前固件发送并断言协议响应 | `--suite` 必需 |
-| `run` | 构建、全擦/写入/校验、复位、等待启动、协议测试 | `--suite` 必需；`--backend` 可选 |
+| `run` | 构建、全擦/写入/校验、复位、等待启动、协议测试 | `--suite` 必需；真实执行须 `--erase-authorization` |
 | `report` | 读取历史结果，不操作硬件 | `--run-id` 必需 |
 
 ```powershell
@@ -23,7 +25,7 @@ embedded-auto device check --target stm32f030 --json
 embedded-auto run --target stm32f030 --suite example_protocol --dry-run --json
 ```
 
-`--dry-run` 保存计划，不编译、不打开串口、不连接、不擦除。退出成功只证明计划生成；必须查看 `data.ready_for_execution`、`blocking_issues`，也不能据此证明实物或产物可用。`device check` 是无侵入检查，不代替硬件验收。
+`--dry-run` 保存计划，不编译、不打开串口、不连接、不擦除。退出成功只证明计划生成；必须查看 `data.ready_for_execution`、`blocking_issues`，也不能据此证明实物或产物可用。`device check` 检查 `flash/run` 的静态擦除范围和保留区，不要求或验证逐次授权，也不代替硬件验收。
 
 退出码 0 为命令定义下成功，1 为操作失败，2 为参数语法错误。JSON 最终字段为 `success/operation/error_code/message/duration_ms/run_id/log_path/data`；服务详细结果位于 `data`，总目录为 `data.run_path`。`report` 返回原结果和原成功状态，不重新验证。模型摘要、终端 PASS 不能替代这些字段和原始证据。
 
@@ -89,6 +91,7 @@ IAR 配置使用 `backend: iar`、实际 `executable`、`project_file` 和 `conf
 | RTS 逻辑有效状态 | `reset.asserted_rts_value`、`polarity_verified` |
 | 电压、接线与开关瞬态 | `voltage_verified/wiring_verified/open_transient_verified`，按真实核验记录 |
 | CLI 版本/参数/成功输出 | `flash.executable/cli_verified` 和成功正则 |
+| CLI 版本声明 | `flash.cli_version/required_cli_version/cli_version_source`，需相同版本及人工核验来源；程序不会查询或证明实际可执行文件版本 |
 | 连接释放延迟 | `reset.release_delay_ms/timing_verified`，板卡和运行证据 |
 | 写入布局与容量 | `flash.address/region_start/region_size/address_source`，核对 linker |
 | 目标兼容性 | `compatibility_verified/target.status`，明确实测范围 |
@@ -117,15 +120,21 @@ embedded-auto reset --target apm32e030 --json
 
 **全片擦除会清除整个内部 Flash，包括 Bootloader、KV、校准、配对参数，即使不在 BIN 覆盖区域内。正式流程不自动备份/恢复。** 执行前确认目标、授权范围和需保留内容；不要把实机校准脚本的额外备份/读回当成正式 CLI 的内建功能。
 
-正式 `flash` 仅接受带 `artifact_manifest.json` 的构建快照，不支持任意裸 BIN 直接导入，也没有忽略身份/哈希/校验的开关。清单不是数字签名，必须来自受信本地构建目录。显示板桌面 BIN 的试验是单独校准记录，不是可复用导入接口。
+`flash` 仅接受带 `artifact_manifest.json` 的构建或导入快照，不能直接传裸 BIN，也没有忽略身份/哈希/校验的开关。清单不是数字签名，必须来自受信本地目录。导入不执行构建或硬件操作：
 
 ```powershell
 embedded-auto build --target apm32e030 --backend gcc --json
-embedded-auto flash --target apm32e030 --artifact "runs/<build_run_id>/firmware.bin" --json
-embedded-auto run --target apm32e030 --suite example_protocol --timeout 120 --json
+embedded-auto artifact import --target apm32e030 --file "<本地固件>.bin" --address 0x08000000 --source "人工确认的来源说明" --json
+embedded-auto flash --target apm32e030 --artifact "runs/<run_id>/firmware.bin" --dry-run --json
 ```
 
-默认读取 BIN 同目录清单；真实写入还要求 `target.status: verified`、CLI/兼容性/时序核验及真实成功正则。进入擦除前先完成全部产物和配置预检。
+导入要求 `target.status: verified`、完整料号、确认的写入区域、`flash.ram_start/ram_size/ram_source`，只支持从 `0x08000000` 启动；检查初始栈指针和 Thumb 复位向量，但不能认证固件来源或兼容性。`integrity_verified` 与 `device_compatibility_verified` 含义不同；源文件后续修改不改变快照，烧录前重新核对快照、清单及同目录 `artifact_manifest.sha256`。清单、摘要和文件可被同一写权限主体共同篡改，因此不是防恶意修改的签名。
+
+真实擦除必须配置 `flash.erase_policy: mass_erase`、完整芯片内部 Flash 的 `physical_flash_start/physical_flash_size/physical_flash_source`；非空 `preserve_regions` 与全擦冲突，直接拒绝。范围擦除和免擦模式均未核验，拒绝执行，绝不退回全擦。区域声明本身不能保护任何数据；本轮没有备份恢复、Option Bytes、RDP 或 OTP 操作。
+
+每次真实 `flash` 或 `run` 还须通过 `--erase-authorization` 单独提供 JSON 对象，键必须恰为 `target_id`、`exact_part_number`、`sha256`、`address`、`erase_policy`、`erase_start`、`erase_size`；`address/erase_start/erase_size` 使用 JSON 整数（十进制），`erase_policy` 为字符串 `mass_erase`。内容须精确匹配当前目标、快照 SHA-256、写入地址与上述完整物理全片起点和大小。不能从目标 YAML、环境变量或通用确认开关继承授权。`run` 构建后的哈希必须与本次明确提供的值一致；未知时先构建、检查快照，再评估单独 flash。未提供授权的旧命令现在安全拒绝；dry-run 只提供计划并列出阻断项。
+
+默认读取 BIN 同目录清单；真实写入还要求 CLI 版本声明与所需版本一致、`target.status: verified`、CLI/兼容性/时序核验及真实成功正则。软件只检查声明，不运行工具查询实际版本，也不证明串口空闲、设备身份或复位物理状态。进入擦除前先完成全部产物和配置预检。
 
 ```text
 CLI -c port=SWD mode=NORMAL reset=SWrst -e all
@@ -138,6 +147,8 @@ CLI -c port=SWD mode=NORMAL reset=SWrst -w firmware.bin 0x08000000 -v
 `flash.erase_success_pattern` 必须来自本机实际输出，不用总能匹配的宽泛正则；当前已实测文本与工具版本在 [验收记录](VALIDATION.md)。擦除证据见 `erase.log` 和 `flash_result.json` 的 `data.erase`；dry-run 显示顺序、命令及破坏性警告。
 
 `flash` 在校验后脉冲复位，不等待启动标志或执行协议测试；`run` 还根据 `startup.ready_pattern` 等待新固件启动，超时为 `startup.timeout_s`，使用 `serial.encoding` 解码；病态启动正则在独立工作进程中执行，受启动超时与总截止时间约束。标志为空时只等 `settle_delay_s` 并明确标记弱判断，不声称检测到了启动。
+
+`stability evaluate --records <记录.json> --json` 仅检查恰好 20 条记录：每条含唯一 `run_id`、`target_id/device_id/sha256`、整数 `erase_start/erase_size/duration_ms` 和布尔 `success/verified/boot_confirmed/cleanup_succeeded`；设备、镜像和范围须一致，首次失败后不得继续。即使记录格式通过，`hardware_stability_verified` 仍为 false；该命令不会执行重复测试或认证人工填写的事实。
 
 ## 协议套件
 
@@ -190,11 +201,12 @@ Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute,
 | `run_config.yaml`、`events.jsonl`、`run_summary.json` | 生效配置、时序事件、最终步骤和清理结果 |
 | `git_state.json`、`git_diff.patch`、`agent_summary.md` | 源码状态及证据入口，不是完整源码备份 |
 | `build.log/build_result.json`、`firmware.bin/artifact_manifest.json` | 构建证据和快照；独立 flash 另存输入清单 |
+| `flash_input.bin` | 本次烧录的输入副本，擦除前核对是否与获授权镜像一致；保留作证据，不作为下次烧录的产物清单快照 |
 | `erase.log`、`flash.log/flash_result.json` | 擦除与烧录退出码、参数和匹配结果 |
 | `serial.bin`、`serial.jsonl`、`serial.log` | 原始 RX、RX/TX 时间/hex/偏移、解码文本 |
 | `test_suite.json`、`test_report.json`、`log_analysis.json` | 实际套件、逐项证据和日志摘要 |
 
-先读 `run_summary.json` 的主错误及 `data.cleanup`，再沿事件和原始文件定位；不要用再次烧录覆盖失败证据。运行目录默认不进入 Git。
+先读 `run_summary.json` 的主错误、`data.diagnostics` 与 `data.cleanup`，再沿事件和原始文件定位；`data.reset_cleanup` 分别记录释放尝试/API、端口关闭和未知物理状态。擦除已确认但写入/校验未完成时可能无法启动；不要用再次烧录覆盖失败证据。运行目录默认不进入 Git。
 
 | 错误 | 排查/停止要求 |
 | --- | --- |
@@ -202,6 +214,7 @@ Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute,
 | `BUILD_TOOL_NOT_FOUND/BUILD_CONFIG_INVALID` | 真实工具/工程路径与 argv；Cube/IAR 不在 PATH 不等于未安装 |
 | `BUILD_FAILED/BUILD_TIMEOUT/ARTIFACT_STALE` | 查 `build.log`，确认本次生成 BIN，不改时间戳、不烧录旧文件 |
 | `ARTIFACT_*` | 查目标、清单、快照、哈希、大小、地址与区域；重新正确构建，不伪造 manifest |
+| `FLASH_ERASE_SCOPE_UNVERIFIED/FLASH_REGION_CONFLICT/FLASH_DESTRUCTIVE_AUTH_REQUIRED` | 核对实际全片范围、保留区和本次绑定授权；未知时停止，不降级全擦 |
 | `FLASH_TOOL_NOT_FOUND/CONNECT_FAILED/CONNECT_TIMEOUT` | 检查完整工具路径、CLI 输出、电源、接线/复位；先只连接，不自动改模式 |
 | `FLASH_ERASE_FAILED` | 查 `erase.log/data.erase`；不启动写入。若已经擦除而后续失败，板卡可能无法启动，保留现场，不静默恢复/重试 |
 | `FLASH_FAILED/FLASH_VERIFY_FAILED` | 停止协议测试，检查输出、布局与工具兼容，不将校验失败标成功 |
@@ -211,7 +224,8 @@ Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute,
 | `SERIAL_BUFFER_RANGE` | 窗口已过期；原始文件仍保留，合理调整缓冲或判定窗口 |
 | `BOOT_TIMEOUT/PROTOCOL_TEST_FAILED` | 查最后复位后的 RX、编码、标志或逐条断言；不放宽预期制造 PASS |
 | `BOOT_MATCHER_FAILED` | 启动匹配器自身启动/通信故障，属环境问题而非固件协议失败；查本机进程/资源后重试，不进入修复循环 |
-| `WORKFLOW_TIMEOUT/CANCELLED` | 查进程、NRST、COM 清理记录，再决定下一步 |
+| `WORKFLOW_TIMEOUT/CANCELLED` | 查 `diagnostics` 确认擦除及写入阶段；同时检查进程、NRST、COM 清理记录，再决定下一步 |
+| `ARCHIVE_FAILED` | 查看 `data.archive_error` 和原始证据；JSON 仍可写时 `report` 返回同一个失败判定 |
 | `CLEANUP_FAILED/PROCESS_CLEANUP_FAILED/LOG_WRITE_FAILED` | 保留主故障和 PID/路径，检查磁盘、端口及硬件，不把报告失败当成功 |
 | `REPAIR_LIMIT_REACHED/REPAIR_POLICY_VIOLATION` | 停止，交付证据，不自动提高上限或修改保护规则 |
 

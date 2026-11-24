@@ -162,19 +162,24 @@ class BleWorkflow:
             message = f"{message}；断言 {data['verdict']}；{mode}"
             result = OperationResult(error is None, operation, error.code if error else None, message,
                                      log_path=ctx.path / "ble_events.jsonl" if evidence else None, data=data)
-            try:
-                write_json(ctx.path / "ble_assertions.json", {
-                    key: data[key] for key in ("verdict", "cases", "preflight", "assertions") if key in data})
-                return ctx.finish(result)
-            except OSError as exc:
+
+            def record_archive_failure(exc):
                 data["evidence_complete"] = False
                 data["cleanup"].append({"action": "archive", "success": False,
                                         "error_code": "LOG_WRITE_FAILED", "message": str(exc)})
+                if result.success:
+                    result.message = str(exc)
                 result.success = False
                 result.error_code = result.error_code or "LOG_WRITE_FAILED"
-                result.message = result.message if error else str(exc)
                 result.run_id = ctx.run_id
                 data["run_path"] = str(ctx.path)
+
+            try:
+                write_json(ctx.path / "ble_assertions.json", {
+                    key: data[key] for key in ("verdict", "cases", "preflight", "assertions") if key in data})
+                return ctx.finish(result, on_summary_error=record_archive_failure)
+            except OSError as exc:
+                record_archive_failure(exc)
                 return result
 
     @staticmethod

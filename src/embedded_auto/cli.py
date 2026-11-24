@@ -36,6 +36,20 @@ def parser():
     common(device)
     checks = device.add_subparsers(dest="device_command", required=True)
     common(checks.add_parser("check"))
+    artifact = commands.add_parser("artifact", help="离线管理固件快照")
+    common(artifact)
+    imports = artifact.add_subparsers(dest="artifact_command", required=True)
+    imported = imports.add_parser("import", help="导入外部 BIN 快照")
+    common(imported)
+    imported.add_argument("--file", required=True)
+    imported.add_argument("--address", required=True)
+    imported.add_argument("--source", required=True, help="明确描述固件来源")
+    stability = commands.add_parser("stability", help="离线检查重复运行记录，不操作硬件")
+    common(stability)
+    stability_commands = stability.add_subparsers(dest="stability_command", required=True)
+    evaluation = stability_commands.add_parser("evaluate")
+    common(evaluation)
+    evaluation.add_argument("--records", required=True, help="人工整理的 JSON 记录数组")
     ble = commands.add_parser("ble", help="BLE UUID 读写/通知验证；默认使用显式配置的后端")
     ble_common(ble)
     ble_commands = ble.add_subparsers(dest="ble_command", required=True)
@@ -68,6 +82,8 @@ def parser():
         if name == "flash":
             sub.add_argument("--artifact", required=True, help="带构建身份清单的 BIN 快照")
             sub.add_argument("--manifest", help="默认读取 BIN 同目录的 artifact_manifest.json")
+        if name in ("flash", "run"):
+            sub.add_argument("--erase-authorization", help="本次目标、SHA-256、地址及全片范围的 JSON 授权对象")
         if name in ("run", "test"):
             sub.add_argument("--suite", required=True, help="测试套件 ID 或 YAML 路径")
         if name == "monitor":
@@ -103,12 +119,20 @@ def report(config_path, run_id):
 def main(argv=None):
     args = parser().parse_args(argv)
     operation = "device check" if args.command == "device" else args.command
+    if args.command == "artifact":
+        operation = "artifact import"
+    if args.command == "stability":
+        operation = "stability evaluate"
     if args.command == "ble":
         operation = f"ble {args.ble_command}"
     config_path = Path(getattr(args, "config", "configs/app.yaml")).resolve()
     try:
         if operation == "report":
             result = report(config_path, args.run_id)
+        elif operation == "stability evaluate":
+            from .firmware.stability import evaluate_records
+            records = json.loads(Path(args.records).read_text(encoding="utf-8"))
+            result = evaluate_records(records).to_dict()
         elif args.command == "ble":
             from .application.ble_workflow import execute_ble
             result = execute_ble(args, config_path).to_dict()
@@ -123,6 +147,15 @@ def main(argv=None):
                 if hasattr(args, key):
                     overrides.setdefault("serial", {})[key] = getattr(args, key)
             config = load_config(config_path, target, overrides)
+            if operation == "artifact import":
+                if getattr(args, "dry_run", False):
+                    raise ToolError("CONFIG_INVALID", "artifact import 不支持 --dry-run；不会创建快照")
+                from .core.run_context import RunContext
+                from .firmware.artifact_import import import_artifact
+                ctx = RunContext(config, operation, getattr(args, "timeout", None))
+                result = import_artifact(config, ctx, args.file, args.address, args.source).to_dict()
+            else:
+                result = None
             suite = None
             if operation in ("test", "run"):
                 suite_path = Path(args.suite)
@@ -132,12 +165,19 @@ def main(argv=None):
                 suite = load_yaml(suite_path.resolve())
             if hasattr(args, "duration"):
                 number(args.duration, "duration", 0.001)
-            from .application.workflow_engine import WorkflowEngine
-            result = WorkflowEngine().execute(
-                config, operation, suite=suite,
-                artifact=getattr(args, "artifact", None), manifest_path=getattr(args, "manifest", None),
-                duration=getattr(args, "duration", 30), timeout_s=getattr(args, "timeout", None),
-                dry_run=getattr(args, "dry_run", False)).to_dict()
+            if result is None:
+                from .application.workflow_engine import WorkflowEngine
+                authorization = None
+                if getattr(args, "erase_authorization", None):
+                    try:
+                        authorization = json.loads(args.erase_authorization)
+                    except ValueError as exc:
+                        raise ToolError("CONFIG_INVALID", f"擦除授权 JSON 无效: {exc}") from exc
+                result = WorkflowEngine().execute(
+                    config, operation, suite=suite,
+                    artifact=getattr(args, "artifact", None), manifest_path=getattr(args, "manifest", None),
+                    duration=getattr(args, "duration", 30), timeout_s=getattr(args, "timeout", None),
+                    dry_run=getattr(args, "dry_run", False), authorization=authorization).to_dict()
     except ToolError as exc:
         result = OperationResult(False, operation, exc.code, str(exc), data=exc.data).to_dict()
     except KeyboardInterrupt:
@@ -154,6 +194,8 @@ def main(argv=None):
             status = "计划生成" if result.get("data", {}).get("dry_run") else "操作完成"
             detail = f": {result['message']}" if not result["success"] else ""
             print(f"{status if result['success'] else '操作失败'} {operation}；断言 {verdict}；{mode}{detail}")
+        elif args.command == "stability":
+            print(f"{'记录检查通过（非实机验收）' if result['success'] else '记录检查失败'}: {result['message']}")
         else:
             print(f"{'PASS' if result['success'] else 'FAIL'} {operation}: {result['message']}")
         if result.get("error_code"):

@@ -25,6 +25,14 @@ def validate_build_config(config):
             text(b.get(field), f"build.{field}")
 
 
+def validate_cli_version(flash):
+    actual = text(flash.get("cli_version"), "flash.cli_version")
+    expected = text(flash.get("required_cli_version"), "flash.required_cli_version")
+    text(flash.get("cli_version_source"), "flash.cli_version_source")
+    if actual != expected:
+        raise ToolError("CONFIG_INVALID", "声明的 CLI 版本不符合所需版本")
+
+
 def validate_programmer_config(config, operation):
     target = config["target"]
     f = config["flash"]
@@ -36,6 +44,7 @@ def validate_programmer_config(config, operation):
         raise ToolError("CONFIG_INVALID", "当前 CH340 复位接线不支持 ST-Link HWrst")
     if f.get("cli_verified") is not True:
         raise ToolError("CONFIG_INVALID", "须先核对本机 CubeProgrammer 帮助和 CLI 参数")
+    validate_cli_version(f)
     if operation != "connect" and (f.get("compatibility_verified") is not True or target.get("status") != "verified"):
         raise ToolError("CONFIG_INVALID", "此目标未完成 connect-only 兼容性核验")
     if operation != "connect" and config["reset"].get("timing_verified") is not True:

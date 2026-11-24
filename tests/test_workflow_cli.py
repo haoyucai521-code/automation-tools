@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import multiprocessing
@@ -35,7 +36,10 @@ def config_for(root):
                   "address": 0x08000000, "region_start": 0x08000000, "region_size": 1024, "address_source": "fake-layout-v1",
                   "verify": True, "timeout_s": 3, "cli_verified": True, "compatibility_verified": True,
                   "connect_success_pattern": "CONNECTED", "erase_success_pattern": "ERASED",
-                  "write_success_pattern": "WRITTEN", "verify_success_pattern": "VERIFIED"},
+                  "write_success_pattern": "WRITTEN", "verify_success_pattern": "VERIFIED",
+                  "erase_policy": "mass_erase", "physical_flash_start": 0x08000000,
+                  "physical_flash_size": 2048, "physical_flash_source": "synthetic fixture",
+                  "cli_version": "fake-1", "required_cli_version": "fake-1", "cli_version_source": "synthetic fixture"},
         "reset": {"asserted_rts_value": True, "pulse_ms": 1, "release_delay_ms": 1,
                   "polarity_verified": True, "voltage_verified": True, "wiring_verified": True,
                   "open_transient_verified": True, "timing_verified": True},
@@ -45,6 +49,13 @@ def config_for(root):
 
 
 SUITE = {"version": 1, "tests": [{"name": "ping", "send_text": "PING\n", "expect": {"contains_text": "PONG"}, "timeout_s": .1}]}
+
+
+def authorization_for(config):
+    return {"target_id": config["target"]["id"], "exact_part_number": config["target"]["exact_part_number"],
+            "sha256": hashlib.sha256(b"firmware").hexdigest(), "address": config["flash"]["address"],
+            "erase_policy": "mass_erase", "erase_start": config["flash"]["physical_flash_start"],
+            "erase_size": config["flash"]["physical_flash_size"]}
 
 
 class MemorySerial:
@@ -178,7 +189,7 @@ class WorkflowTests(unittest.TestCase):
                               flasher=kwargs.pop("flasher", FlashService(PythonProgrammer())), **kwargs)
 
     def test_full_workflow_real_child_processes_no_hardware(self):
-        result = self.engine().execute(self.config, "run", suite=SUITE)
+        result = self.engine().execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertTrue(result.success, result.to_dict())
         path = Path(result.data["run_path"])
         for name in ("run_summary.json", "run_config.yaml", "events.jsonl", "artifact_manifest.json",
@@ -199,7 +210,7 @@ class WorkflowTests(unittest.TestCase):
     def test_build_failure_does_not_open_serial_or_flash_old_bin(self):
         (self.root / "source.bin").write_bytes(b"old")
         self.config["build"]["command"] = [sys.executable, "-c", "raise SystemExit(2)"]
-        result = self.engine().execute(self.config, "run", suite=SUITE)
+        result = self.engine().execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertEqual(result.error_code, "BUILD_FAILED")
         self.assertFalse(self.sessions)
         self.assertEqual((self.root / "source.bin").read_bytes(), b"old")
@@ -209,7 +220,7 @@ class WorkflowTests(unittest.TestCase):
             def flash(self, *args, **kwargs):
                 return OperationResult(False, "flash", "FLASH_VERIFY_FAILED", "failed")
         runner = unittest.mock.Mock()
-        result = self.engine(flasher=FailedFlash(), runner_factory=runner).execute(self.config, "run", suite=SUITE)
+        result = self.engine(flasher=FailedFlash(), runner_factory=runner).execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertEqual(result.error_code, "FLASH_VERIFY_FAILED")
         runner.assert_not_called()
         self.assertTrue(self.sessions[0].closed)
@@ -222,7 +233,7 @@ class WorkflowTests(unittest.TestCase):
             state = "unknown"
             def __init__(self, *args): pass
             def release_reset(self): raise RuntimeError("wire failure")
-        result = self.engine(flasher=FailedFlash(), reset_factory=BadReset).execute(self.config, "run", suite=SUITE)
+        result = self.engine(flasher=FailedFlash(), reset_factory=BadReset).execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertEqual(result.error_code, "FLASH_FAILED")
         self.assertFalse(result.data["cleanup"][0]["success"])
 
@@ -245,7 +256,7 @@ class WorkflowTests(unittest.TestCase):
                 raise OSError("events.jsonl unwritable")
             return original_event(self, state, **data)
         with patch.object(RunContext, "event", broken_event):
-            result = self.engine(flasher=FailedFlash(), reset_factory=RecordingReset).execute(self.config, "run", suite=SUITE)
+            result = self.engine(flasher=FailedFlash(), reset_factory=RecordingReset).execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertEqual(result.error_code, "FLASH_FAILED")  # 主错误保留，不被清理故障覆盖
         self.assertTrue(releases)
         self.assertTrue(self.sessions[0].closed)
@@ -262,7 +273,7 @@ class WorkflowTests(unittest.TestCase):
                 raise OSError("events.jsonl unwritable")
             return original_event(self, state, **data)
         with patch.object(RunContext, "event", broken_event):
-            result = self.engine().execute(self.config, "run", suite=SUITE)
+            result = self.engine().execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config))
         self.assertFalse(result.success)  # 操作成功但清理失败仍应失败
         self.assertEqual(result.error_code, "CLEANUP_FAILED")
         self.assertTrue(self.sessions[0].closed)
@@ -314,7 +325,7 @@ class WorkflowTests(unittest.TestCase):
         config = copy.deepcopy(self.config)
         config["startup"] = {"ready_pattern": "(x+x+)+y", "timeout_s": 0.05, "settle_delay_s": 0}
         began = time.monotonic()
-        result = engine.execute(config, "run", suite=SUITE)
+        result = engine.execute(config, "run", suite=SUITE, authorization=authorization_for(config))
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "BOOT_TIMEOUT")
         self.assertEqual(result.data["failure"]["received_hex"], (b"x" * 23).hex())
@@ -332,7 +343,7 @@ class WorkflowTests(unittest.TestCase):
         config = copy.deepcopy(self.config)
         config["startup"] = {"ready_pattern": "(x+x+)+y", "timeout_s": 30, "settle_delay_s": 0}
         began = time.monotonic()
-        result = engine.execute(config, "run", suite=SUITE, timeout_s=2)
+        result = engine.execute(config, "run", suite=SUITE, authorization=authorization_for(config), timeout_s=2)
         self.assertEqual(result.error_code, "WORKFLOW_TIMEOUT")
         self.assertLess(time.monotonic() - began, 8)  # 硬上界：总截止 2s + 回收/清理
         self.assertFalse(port.rts)
@@ -348,7 +359,7 @@ class WorkflowTests(unittest.TestCase):
                                  flasher=OkFlash())
         config = copy.deepcopy(self.config)
         config["startup"] = {"ready_pattern": "^.$", "timeout_s": 2, "settle_delay_s": 0}
-        result = engine.execute(config, "run", suite=SUITE)
+        result = engine.execute(config, "run", suite=SUITE, authorization=authorization_for(config))
         self.assertTrue(result.success, result.to_dict())
         self.assertEqual(result.data["boot"]["method"], "ready_pattern")
         # 单个多字节字符按文本计一个字符；若退化为字节匹配，^.$ 会误判 BOOT_TIMEOUT。
@@ -363,7 +374,7 @@ class WorkflowTests(unittest.TestCase):
         config = copy.deepcopy(self.config)
         config["startup"] = {"ready_pattern": "BOOT READY", "timeout_s": 2, "settle_delay_s": 0}
         with patch.object(SpawnProcess, "start", side_effect=OSError("spawn failed")):
-            result = engine.execute(config, "run", suite=SUITE)
+            result = engine.execute(config, "run", suite=SUITE, authorization=authorization_for(config))
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "BOOT_MATCHER_FAILED")  # 不误报为协议测试失败
         self.assertNotIn(result.error_code, {"BOOT_TIMEOUT", "PROTOCOL_TEST_FAILED"})
@@ -386,7 +397,7 @@ class WorkflowTests(unittest.TestCase):
     def test_dry_run_does_not_call_hardware_or_build(self):
         self.config["reset"]["asserted_rts_value"] = "TODO_MEASURE"
         builder = unittest.mock.Mock()
-        result = self.engine(builder=builder).execute(self.config, "run", suite=SUITE, dry_run=True)
+        result = self.engine(builder=builder).execute(self.config, "run", suite=SUITE, authorization=authorization_for(self.config), dry_run=True)
         self.assertTrue(result.success)
         self.assertFalse(result.data["ready_for_execution"])
         builder.build.assert_not_called()
@@ -424,7 +435,8 @@ class ConfigAndCLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config = config_for(Path(directory))
             result = WorkflowEngine.plan(config, "run", SUITE)
-            self.assertTrue(result.data["ready_for_execution"])
+            self.assertFalse(result.data["ready_for_execution"])
+            self.assertTrue(any("FLASH_DESTRUCTIVE_AUTH_REQUIRED" in issue for issue in result.data["blocking_issues"]))
             self.assertEqual(result.data["commands"]["build"], config["build"]["command"])
             self.assertIn("-v", result.data["commands"]["programmer"])
             self.assertEqual(result.data["commands"]["erase"][-2:], ["-e", "all"])

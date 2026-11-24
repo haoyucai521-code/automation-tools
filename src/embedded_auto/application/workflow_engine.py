@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 import shutil
 import time
 from pathlib import Path
@@ -30,6 +31,8 @@ class WorkflowEngine:
     @staticmethod
     def plan(config, operation, suite=None):
         issues = validation_issues(config, operation)
+        if operation in ("flash", "run"):
+            issues.append("FLASH_DESTRUCTIVE_AUTH_REQUIRED: 本次镜像和擦除范围须单独授权")
         if operation in ("run", "test"):
             from embedded_auto.serial.test_runner import validate_suite
             try:
@@ -84,7 +87,7 @@ class WorkflowEngine:
         build_tool = b.get("executable") if b.get("backend") == "iar" else (b.get("command") or [None])[0]
         for label, executable in (("build", build_tool), ("programmer", f.get("executable"))):
             tools[label] = {"configured": executable, "resolved": shutil.which(executable) if executable else None}
-        issues = {op: validation_issues(config, op) for op in ("build", "monitor", "connect", "run")}
+        issues = {op: validation_issues(config, op) for op in ("build", "monitor", "connect", "flash", "run")}
         ports = serial_ports()
         missing_port = not any(p["device"].casefold() == str(config["serial"].get("port", "")).casefold() for p in ports)
         ready = not any(issues.values()) and all(item["resolved"] for item in tools.values()) and not missing_port
@@ -94,7 +97,7 @@ class WorkflowEngine:
                                "hardware_verified_by_this_check": False})
 
     def execute(self, config, operation, *, suite=None, artifact=None, manifest_path=None,
-                duration=30, timeout_s=None, dry_run=False):
+                duration=30, timeout_s=None, dry_run=False, authorization=None):
         if operation not in ("device check", "build", "flash", "connect", "reset", "monitor", "test", "run"):
             raise ToolError("CONFIG_INVALID", f"不支持的操作: {operation}")
         ctx = RunContext(config, operation, timeout_s,
@@ -102,6 +105,7 @@ class WorkflowEngine:
         session = reset = logger = None
         opened = False
         steps, cleanup = {}, []
+        phase = "plan" if dry_run else "preflight"
         result = OperationResult(False, operation, "INTERNAL_ERROR", "操作未完成")
         try:
             if dry_run:
@@ -120,6 +124,7 @@ class WorkflowEngine:
                 ctx.check()
                 ctx.snapshot_git()
                 if operation in ("build", "run"):
+                    phase = "build"
                     ctx.event("BUILD")
                     build = self.builder.build(config, ctx)
                     steps["build"] = build.to_dict()
@@ -129,6 +134,7 @@ class WorkflowEngine:
                     manifest_path = ctx.path / "artifact_manifest.json"
                 image, manifest = None, None
                 if operation in ("flash", "run"):
+                    phase = "preflight"
                     from embedded_auto.firmware.build_service import validate_artifact
                     ctx.event("VALIDATE_ARTIFACT")
                     if artifact is None:
@@ -140,11 +146,22 @@ class WorkflowEngine:
                     except (OSError, ValueError) as exc:
                         raise ToolError("ARTIFACT_INVALID", f"缺少或无效的产物身份清单: {exc}") from exc
                     steps["artifact"] = validate_artifact(image, manifest, config)
+                    from embedded_auto.firmware.erase_policy import validate_erase_policy
+                    steps["erase_authorization"] = validate_erase_policy(config, steps["artifact"], authorization)
                     write_json(ctx.path / "input_artifact_manifest.json", manifest)
                 if operation == "build":
                     result = OperationResult(True, operation, message="构建成功，产物已独立归档", data=steps)
                 else:
+                    if operation in ("connect", "flash", "run"):
+                        executable = config["flash"].get("executable")
+                        if not executable or not shutil.which(executable):
+                            raise ToolError("FLASH_TOOL_NOT_FOUND", "烧录工具路径不存在或不可执行")
+                        delay = config["reset"]["release_delay_ms"] / 1000
+                        timeout = config["flash"].get("timeout_s", 60)
+                        if not math.isfinite(delay) or delay >= min(timeout, ctx.remaining):
+                            raise ToolError("FLASH_CONFIG_INVALID", "复位释放延迟超出阶段或剩余总预算")
                     ctx.event("OPEN_SERIAL")
+                    phase = "open_serial"
                     session = self.session_factory(config)
                     logger = self.log_factory(session, ctx, encoding=config["serial"].get("encoding", "utf-8"))
                     logger.start()
@@ -154,17 +171,22 @@ class WorkflowEngine:
                     reset = self.reset_factory(session, config, ctx)
                     session.check()
                     if operation in ("run", "flash", "connect"):
-                        flashed = self.flasher.flash(config, ctx, session, reset, image, manifest,
-                                                     connect_only=operation == "connect")
+                        phase = "flash" if operation != "connect" else "connect"
+                        kwargs = {"connect_only": operation == "connect"}
+                        if operation != "connect":
+                            kwargs["authorization"] = authorization
+                        flashed = self.flasher.flash(config, ctx, session, reset, image, manifest, **kwargs)
                         steps["flash"] = flashed.to_dict()
                         if not flashed.success:
                             raise ToolError(flashed.error_code or "FLASH_FAILED", flashed.message, flashed.data)
                     if operation in ("run", "flash", "reset"):
+                        phase = "reset"
                         # NORMAL 连接可能停核；校验后复位启动新固件，并从脉冲前捕获启动证据。
                         boot_start = session.mark()
                         ctx.event("PULSE_RESET")
                         reset.pulse()
                     if operation == "run":
+                        phase = "boot"
                         ctx.event("WAIT_BOOT")
                         startup = config["startup"]
                         if startup.get("ready_pattern"):
@@ -204,6 +226,7 @@ class WorkflowEngine:
                             ctx.sleep(startup.get("settle_delay_s", 1))
                             steps["boot"] = {"method": "delay", "warning": "未通过启动标志确认，仅等待配置延时"}
                     if operation in ("run", "test"):
+                        phase = "test"
                         ctx.event("RUN_TESTS")
                         tested = self.runner_factory(session, ctx).run(suite)
                         steps["tests"] = tested.to_dict()
@@ -214,18 +237,21 @@ class WorkflowEngine:
                         ctx.sleep(duration)
                     session.check()
                     result = OperationResult(True, operation, message="操作完成，证据已归档", data=steps)
+                    phase = "complete"
                 ctx.event("PASS")
         except ToolError as exc:
             result = OperationResult(False, operation, exc.code, str(exc), data={**steps, "failure": exc.data})
-            ctx.event("FAILED", error_code=exc.code, message=str(exc))
         except KeyboardInterrupt:
             ctx.cancelled.set()
             result = OperationResult(False, operation, "CANCELLED", "用户中断", data=steps)
-            ctx.event("FAILED", error_code="CANCELLED")
         except Exception as exc:
             result = OperationResult(False, operation, "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}", data=steps)
-            ctx.event("FAILED", error_code="INTERNAL_ERROR", message=str(exc))
         finally:
+            if not result.success and not dry_run:
+                try:
+                    ctx.event("FAILED", error_code=result.error_code, message=result.message)
+                except Exception as exc:
+                    cleanup.append({"action": "failure_event", "success": False, "message": str(exc)})
             try:
                 ctx.event("CLEANUP")
             except Exception as exc:
@@ -250,6 +276,20 @@ class WorkflowEngine:
                 except Exception as exc:
                     cleanup.append({"action": "close_logs", "success": False, "message": str(exc)})
             result.data["cleanup"] = cleanup
+            facts = getattr(session, "cleanup_facts", None)
+            result.data["reset_cleanup"] = dict(facts) if isinstance(facts, dict) else {
+                "release_attempted": False if session is None else None,
+                "release_api_succeeded": None, "port_close_succeeded": None,
+                "physical_reset_state": "UNKNOWN"}
+            flash_data = steps.get("flash", {}).get("data", {})
+            result.data["diagnostics"] = {
+                "phase": flash_data.get("phase", phase) if phase == "flash" else phase,
+                "destructive_effect": flash_data.get("destructive_effect", "UNKNOWN" if phase == "flash" else "NOT_STARTED"),
+                "confirmed_actions": flash_data.get("confirmed_actions", []),
+                "manual_review": flash_data.get("manual_review", "按错误、证据和清理状态人工复核；未测量的物理状态未知"),
+                "evidence_path": str(ctx.path), "cleanup": cleanup,
+                "tool_version_status": "NOT_VERIFIED_THIS_RUN" if operation in ("flash", "run", "connect") else "NOT_APPLICABLE",
+                "plan_only": dry_run}
             if any(not action["success"] for action in cleanup) and result.success:
                 result.success, result.error_code, result.message = False, "CLEANUP_FAILED", "操作成功但清理失败；硬件状态可能不确定"
             if logger is not None and (ctx.path / "serial.log").exists():
@@ -260,4 +300,12 @@ class WorkflowEngine:
                     result.data["log_analysis"] = analysis
                 except Exception as exc:
                     result.data["log_analysis_error"] = str(exc)
-        return ctx.finish(result)
+        try:
+            return ctx.finish(result)
+        except (OSError, ValueError, TypeError) as exc:
+            result.run_id = ctx.run_id
+            result.data["archive_error"] = str(exc)
+            result.data.setdefault("run_path", str(ctx.path))
+            if result.success:
+                result.success, result.error_code, result.message = False, "ARCHIVE_FAILED", "运行结果归档失败"
+            return result

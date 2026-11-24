@@ -1,5 +1,7 @@
 # Embedded Auto
 
+当前版本：0.2.0（实机验收状态见下方记录）。
+
 Windows/Python 本地嵌入式自动化工具：IAR/GCC 构建、BIN 身份与区域校验、CH340 RTS 复位、CubeProgrammer 全片擦除/写入/校验、串口证据、确定性协议测试和有限 Agent 修复回调。另有独立 BLE UUID 读写/通知测试，提供 Fake 离线闭环及 Bleak 适配器；真实 BLE 尚未实机验收。
 
 **当前 APM32E030 显示板已完成单次全擦、写入校验和启动日志实测。** 这不是三平台或完整真实构建/协议闭环验收；三个目标 YAML 仍为阻塞模板。当前支持矩阵和实机证据只在 [验收记录](docs/VALIDATION.md) 维护。
@@ -25,7 +27,7 @@ embedded-auto ble test --config configs/ble/demo.yaml --suite configs/ble/suites
 
 dry-run 不构建、不打开串口、不操作目标；返回成功仅指计划生成，继续检查 `data.ready_for_execution` 和 `blocking_issues`。真实操作前按 [使用指南](docs/USER_GUIDE.md) 核对工程、布局、电气与授权，先只连接再烧录。
 
-**当前烧录会全片擦除，参数/KV/Bootloader 都可能丢失；正式流程不自动备份或恢复。** 固定写入起点与完整操作说明见 [烧录与启动](docs/USER_GUIDE.md#烧录与启动)。
+**烧录需逐次提供绑定镜像和全片范围的授权；全片擦除会清除参数/KV/Bootloader，不自动备份恢复。** 外部 BIN 导入及完整门槛见 [烧录与启动](docs/USER_GUIDE.md#烧录与启动)。
 
 ## 开发与文档
 

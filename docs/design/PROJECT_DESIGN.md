@@ -20,6 +20,8 @@ Windows 本地 Python 工具，将 IAR/GCC 构建、BIN 身份校验、CH340 RTS
 | 模型/契约 | [core/models.py](../../src/embedded_auto/core/models.py)、[errors.py](../../src/embedded_auto/core/errors.py)、[firmware/interfaces.py](../../src/embedded_auto/firmware/interfaces.py)、[serial/interfaces.py](../../src/embedded_auto/serial/interfaces.py) | `OperationResult`、`ToolError`、领域 `Protocol` | 通用结果/稳定错误目录与分领域接口；工作流状态位于 [application/models.py](../../src/embedded_auto/application/models.py) |
 | 上下文/进程 | [core/run_context.py](../../src/embedded_auto/core/run_context.py)、[process.py](../../src/embedded_auto/core/process.py) | `RunContext`、`ProcessRunner.run()` | 运行目录、事件、超时/取消、进程执行与回收 |
 | 构建 | [firmware/build_service.py](../../src/embedded_auto/firmware/build_service.py)、[adapters/build/](../../src/embedded_auto/adapters/build/) | `BuildService.build()`、`validate_artifact()` | 注入构建后端，保留产物新鲜度、快照和身份/区域检查 |
+| 外部产物与擦除安全 | [artifact_import.py](../../src/embedded_auto/firmware/artifact_import.py)、[erase_policy.py](../../src/embedded_auto/firmware/erase_policy.py) | `import_artifact()`、`validate_erase_scope()`、`validate_erase_policy()` | 离线导入与向量检查；分开校验静态全片范围和运行时镜像授权 |
+| 稳定性记录 | [stability.py](../../src/embedded_auto/firmware/stability.py) | `evaluate_records()` | 离线检查 20 条记录的格式、一致性和停止规则，不执行或认证硬件操作 |
 | 烧录 | [firmware/flash_service.py](../../src/embedded_auto/firmware/flash_service.py)、[adapters/programmer/stm32cube_cli.py](../../src/embedded_auto/adapters/programmer/stm32cube_cli.py) | `FlashService.flash()`、`ResetAssistedConnectStrategy.run()` | 注入烧录器，保留复位辅助连接、全擦/写入/校验及结果分类；不导入具体串口会话 |
 | 串口 | [serial/serial_session.py](../../src/embedded_auto/serial/serial_session.py)、[adapters/serial/](../../src/embedded_auto/adapters/serial/) | `SerialSession` | 注入底层端口工厂，保持唯一端口所有者、单读线程、订阅、收发及控制线 |
 | 复位 | [serial/reset_controller.py](../../src/embedded_auto/serial/reset_controller.py) | `ResetController` | 逻辑极性、保持/释放/脉冲及状态记录 |
@@ -52,7 +54,7 @@ CLI → application（配置组合、工作流、依赖装配）
 - `OperationResult` 字段为 `success/operation/error_code/message/duration_ms/log_path/data/run_id`，`to_dict()` 将路径等转换为可 JSON 序列化值。
 - `ToolError` 携带稳定 `code`、消息和补充数据。服务报告结果，编排层保留步骤与原始主错误，最终另附 `cleanup`。
 - 配置为 `app/target/build/flash/reset/startup/serial` 分区字典；`sources` 记录来源文件。按命令验证，不要求只监听串口的动作填写构建命令。
-- 构建清单记录成功状态、目标/料号、地址来源、SHA-256、大小、时间、命令及源/快照路径。它是本地完整性/身份约束，不是数字签名。
+- 构建清单记录成功状态、目标/料号、地址来源、SHA-256、大小、时间、命令及源/快照路径；外部导入清单独立记录来源、配置和向量检查，不伪造构建记录。两者共用完整性/身份校验，不是数字签名。
 - 串口订阅事件含方向、字节和时间；内存缓冲使用绝对 RX 偏移。测试报告关联发送/接收 hex、时间、偏移和逐项断言。
 - BLE 回调入口按连接 epoch、订阅 generation、特征 ref 分配 ingress_seq，并复制 bytes、保存 monotonic_ns。普通 notify 在开始订阅前建立采集 checkpoint；套件 checkpoint 显式决定窗口。匹配只证明有效窗口内收到单条预期 payload，不证明由某次写入导致。
 - BLE 入口队列和匹配窗口分别维护当前数量/字节占用；出队、淘汰和清理释放容量，单条超限原子拒收，溢出/未归档数据使证据不完整且整体失败。`ble_events.jsonl` 保留原始 hex；早期错误没有 UUID 时省略，不伪造零 UUID。`data.verdict` 与 `OperationResult.success` 分离，清理错误不改写已完成的 case/step 判定。
@@ -66,6 +68,7 @@ VALIDATE_CONFIG / 预检整个套件
   → 保存 Git 状态与 diff
   → BUILD
   → VALIDATE_ARTIFACT
+  → 检查物理全片范围、保留区和本次授权 / 工具路径与时序
   → 日志订阅就绪 / OPEN_SERIAL
   → ERASE_FLASH：复位保持 → 启动 CLI → 按配置延迟释放 → 等待擦除
   → 检查退出码和连接/擦除成功标志
@@ -80,7 +83,7 @@ VALIDATE_CONFIG / 预检整个套件
 - 当前平台起点、CLI 参数和警告在 [烧录操作](../USER_GUIDE.md#烧录与启动) 统一说明；校验入口为 `validate_config()` 和 `CubeProgrammer.command()`。
 - `build` 不打开串口；`connect` 不擦除/写入；`flash` 校验已有快照、全擦/写入/校验并脉冲复位，但不执行 `run` 的启动标志等待与协议断言。
 - 擦除与写入使用独立进程、同一串口和日志会话；每段分别执行复位辅助连接。适配器只构造命令，连接策略控制 RTS；复位控制器不自行打开串口。
-- 产物/套件/成功正则等先预检，才允许破坏性阶段。构建失败不烧录旧 BIN，擦除失败不写入，写入/校验失败不测试。
+- 产物/套件/成功正则及授权先预检，才允许打开串口；进入破坏性阶段前还校验并保护烧录输入副本。构建失败不烧录旧 BIN，擦除失败不写入，写入/校验失败不测试；无经过核验的范围擦除实现。
 - `run` 从最后一次脉冲前的新字节偏移等待启动标志，避免旧固件日志误报；启动正则在独立工作进程中按 `startup.timeout_s` 与总截止时间有界执行；没有标志时明确记为弱延时判断。
 - 每条路径都尝试清理。主失败保留，清理失败不覆盖它；操作成功但清理失败则整体不成功。
 
@@ -90,7 +93,7 @@ VALIDATE_CONFIG / 预检整个套件
 
 | 资源 | 唯一所有者 | 边界与检查入口 |
 | --- | --- | --- |
-| 物理 COM 与接收线程 | `SerialSession` | 进程内所有权表、OS 独占；单读循环分发，`open()/close()` 管生命周期 |
+| 物理 COM 与接收线程 | `SerialSession` | 进程内所有权表、OS 独占；单读循环分发，记录释放 API 与端口关闭独立事实，不推断物理状态 |
 | RTS/DTR | 同一串口会话 | `ResetController` 映射复位逻辑；`set_rts()` 在历史接收错误后仍可尝试释放 |
 | 接收内存窗口 | `SerialSession` | 默认有界缓冲，过旧偏移显式失败；归档原始字节不截断 |
 | 串口证据文件 | `LogService` | 先订阅再读；RX 原始字节、收发事件和增量解码文本分别保存 |
@@ -98,8 +101,9 @@ VALIDATE_CONFIG / 预检整个套件
 | BLE 原始证据 | `BleEvidence` | 单事件文件；按类型校验字段，写失败或丢失事件阻断整体成功，不把通知当业务确认 |
 | 外部工具进程 | `ProcessRunner` | 无 shell，输出直接落盘；超时/中断/回调失败后回收进程树并等待 |
 | 构建源产物与运行快照 | 工程构建器 / `BuildService` | 不删用户产物；新鲜度/非空检查后复制快照并验证一致性 |
+| 本次烧录输入副本 | `FlashService` | 排他创建副本并核对获授权的大小、SHA-256；Windows 从校验前到烧录阶段退出保持只共享读取的句柄；非 Windows 的离线验证在写入前再核对副本，不保证同等锁定 |
 | 内部 Flash | `FlashService` 编排、烧录器实际操作 | 写入区域检查不限制全片擦除范围；无自动备份/恢复，禁止无限重试 |
-| 运行目录/报告 | `RunContext` | 唯一目录、事件追加、总结原子替换；不复用历史运行目录 |
+| 运行目录/报告 | `RunContext` | 唯一目录、事件追加、摘要原子替换；先处理 Markdown 摘要，再发布 `report` 读取的最终 JSON；不复用历史运行目录 |
 
 SHA-256 在产物复制与信任边界使用；不把哈希当来源认证。增量构建未真正更新 BIN 会保守返回 `ARTIFACT_STALE`。
 
