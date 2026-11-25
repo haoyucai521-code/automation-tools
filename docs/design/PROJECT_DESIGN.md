@@ -4,7 +4,7 @@
 
 ## 用途与边界
 
-Windows 本地 Python 工具，将 IAR/GCC 构建、BIN 身份校验、CH340 RTS 复位、CubeProgrammer 烧录、串口采集和确定性协议测试串成单目标工作流。BLE 是独立领域：按 service+characteristic UUID 验证读写与通知，不复用串口传输或 MCU target。CLI/Python 调用方与 Agent 供应商解耦；当前实现不含 GUI、MCP Server、动态插件或多板并发。
+Windows 本地 Python 工具，默认提供 `mcu`（烧录和复位）、`serial`（收发和日志）、`ble` 三组独立动作；调用方决定是否执行下一步。IAR/GCC 构建、快照导入、报告为辅助操作；完整单目标 `run`、测试套件和有限修复保留为显式选用的兼容路径。BLE 不复用串口传输或 MCU target。CLI/Python 调用方与 Agent 供应商解耦；当前实现不含 GUI、MCP Server、常驻会话或多板并发。
 
 本仓库控制外部固件工程，不存放其全部源码。硬件参数来自目标配置；实机校准不等于正式 CLI、真实构建或协议闭环已经验收。
 
@@ -23,16 +23,18 @@ Windows 本地 Python 工具，将 IAR/GCC 构建、BIN 身份校验、CH340 RTS
 | 外部产物与擦除安全 | [artifact_import.py](../../src/embedded_auto/firmware/artifact_import.py)、[erase_policy.py](../../src/embedded_auto/firmware/erase_policy.py) | `import_artifact()`、`validate_erase_scope()`、`validate_erase_policy()` | 离线导入与向量检查；分开校验静态全片范围和运行时镜像授权 |
 | 稳定性记录 | [stability.py](../../src/embedded_auto/firmware/stability.py) | `evaluate_records()` | 离线检查 20 条记录的格式、一致性和停止规则，不执行或认证硬件操作 |
 | 烧录 | [firmware/flash_service.py](../../src/embedded_auto/firmware/flash_service.py)、[adapters/programmer/stm32cube_cli.py](../../src/embedded_auto/adapters/programmer/stm32cube_cli.py) | `FlashService.flash()`、`ResetAssistedConnectStrategy.run()` | 注入烧录器，保留复位辅助连接、全擦/写入/校验及结果分类；不导入具体串口会话 |
+| MCU 离线预检 | [application/mcu_preflight.py](../../src/embedded_auto/application/mcu_preflight.py) | `preflight()`、`load_flash_artifact()` | 与执行路径复用产物和工具检查，分别报告具体快照、静态擦除范围、配置阻断；不执行硬件动作 |
 | 串口 | [serial/serial_session.py](../../src/embedded_auto/serial/serial_session.py)、[adapters/serial/](../../src/embedded_auto/adapters/serial/) | `SerialSession` | 注入底层端口工厂，保持唯一端口所有者、单读线程、订阅、收发及控制线 |
+| 串口独立动作 | [application/serial_actions.py](../../src/embedded_auto/application/serial_actions.py) | `serial_options()`、`perform_serial_action()` | 预检载荷、单次发送或定时接收；使用现有单读线程，预览从同一归档文件按绝对偏移读取 |
 | 复位 | [serial/reset_controller.py](../../src/embedded_auto/serial/reset_controller.py) | `ResetController` | 逻辑极性、保持/释放/脉冲及状态记录 |
 | 日志 | [serial/log_service.py](../../src/embedded_auto/serial/log_service.py)、[log_analyzer.py](../../src/embedded_auto/serial/log_analyzer.py) | `LogService`、`LogAnalyzer.analyze()` | 串口原始/解码归档及带证据路径的摘要 |
 | 协议测试 | [serial/test_runner.py](../../src/embedded_auto/serial/test_runner.py) | `validate_suite()`、`TestRunner.run()` | 串口套件预检、发送、等待、全部断言与结果证据 |
 | BLE 领域 | [ble/](../../src/embedded_auto/ble/) | `BleSession`、`TestRunner` | 严格配置、GATT 生命周期、单回调事件入口、字节断言、有界窗口及条件字段证据 |
 | BLE 适配器 | [adapters/ble/](../../src/embedded_auto/adapters/ble/) | `FakeBackend`、`BleakBackend` | 固定 profile 驱动的模拟外设；Bleak 公开 API 薄适配，不改系统蓝牙状态 |
 | 工作流/装配 | [application/workflow_engine.py](../../src/embedded_auto/application/workflow_engine.py)、[composition.py](../../src/embedded_auto/application/composition.py) | `plan()`、`inspect()`、`execute()`；默认服务构造与后端选择 | 跨领域组合、状态/分支、清理与归档；默认后端只在装配层选择 |
-| Agent 契约 | [agent/contract.py](../../src/embedded_auto/agent/contract.py)、[repair_policy.py](../../src/embedded_auto/agent/repair_policy.py) | `describe_contract()`、`RepairPolicy`、`RepairLoop.run()` | 工具映射、有限修复回调与保护检测 |
+| Agent 契约 | [agent/contract.py](../../src/embedded_auto/agent/contract.py)、[repair_policy.py](../../src/embedded_auto/agent/repair_policy.py) | `describe_contract()`、`RepairPolicy`、`RepairLoop.run()` | 三组默认工具和副作用说明；可选套件/编排与有限修复保护 |
 
-测试定位：[构建/烧录](../../tests/test_build_flash.py)、[串口/协议](../../tests/test_serial_protocol.py)、[工作流/CLI/修复](../../tests/test_workflow_cli.py)、[真实 ARM GCC 合成编译](../../tests/test_gcc_integration.py)、[结构/兼容/运行身份](../../tests/test_structure.py)。
+测试定位：[独立动作与工具契约](../../tests/test_independent_actions.py)、[构建/烧录](../../tests/test_build_flash.py)、[串口/协议](../../tests/test_serial_protocol.py)、[工作流/CLI/修复](../../tests/test_workflow_cli.py)、[真实 ARM GCC 合成编译](../../tests/test_gcc_integration.py)、[结构/兼容/运行身份](../../tests/test_structure.py)。
 
 ### 依赖与兼容边界
 
@@ -53,7 +55,7 @@ CLI → application（配置组合、工作流、依赖装配）
 
 - `OperationResult` 字段为 `success/operation/error_code/message/duration_ms/log_path/data/run_id`，`to_dict()` 将路径等转换为可 JSON 序列化值。
 - `ToolError` 携带稳定 `code`、消息和补充数据。服务报告结果，编排层保留步骤与原始主错误，最终另附 `cleanup`。
-- 配置为 `app/target/build/flash/reset/startup/serial` 分区字典；`sources` 记录来源文件。按命令验证，不要求只监听串口的动作填写构建命令。
+- 配置为 `app/target/build/flash/reset/startup/serial` 分区字典；`sources` 记录来源文件。新的 `serial` 动作只要求 `app/target/reset/serial`，不解析构建或烧录路径；RTS 电气校验不变。
 - 构建清单记录成功状态、目标/料号、地址来源、SHA-256、大小、时间、命令及源/快照路径；外部导入清单独立记录来源、配置和向量检查，不伪造构建记录。两者共用完整性/身份校验，不是数字签名。
 - 串口订阅事件含方向、字节和时间；内存缓冲使用绝对 RX 偏移。测试报告关联发送/接收 hex、时间、偏移和逐项断言。
 - BLE 回调入口按连接 epoch、订阅 generation、特征 ref 分配 ingress_seq，并复制 bytes、保存 monotonic_ns。普通 notify 在开始订阅前建立采集 checkpoint；套件 checkpoint 显式决定窗口。匹配只证明有效窗口内收到单条预期 payload，不证明由某次写入导致。
@@ -62,6 +64,10 @@ CLI → application（配置组合、工作流、依赖装配）
 - 原始证据摘要由调用方传入可选 `evidence_hint`，core 不写死串口文件名；当前固件工作流显式传入原提示，因此原摘要不变。创建/完成上下文不自动执行 Git；工作流和修复循环仍显式调用 `snapshot_git()`，历史 `build.cwd` 选择保留为兼容回退，普通上下文可仅用 `app.workspace`。
 
 ## 当前执行流程
+
+独立动作共用上下文、结果、资源释放和归档，不互相串联。`mcu preflight` 仅做离线检查；`mcu connect/reset/program` 复用各自旧阶段，不进入兼容 `run`。串口动作先校验参数和配置，再订阅日志、打开 COM，执行一个动作后关闭；既不调用编译/烧录，也不脉冲复位。发送附带监听时先标记 RX 偏移，再写入，并在同一会话内等待有限时间；原始归档与预览均来自单读线程，不为预览再读物理端口。
+
+以下是显式使用兼容 `run` 时的完整链路：
 
 ```text
 VALIDATE_CONFIG / 预检整个套件

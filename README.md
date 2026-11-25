@@ -2,7 +2,7 @@
 
 当前版本：0.2.0（实机验收状态见下方记录）。
 
-Windows/Python 本地嵌入式自动化工具：IAR/GCC 构建、BIN 身份与区域校验、CH340 RTS 复位、CubeProgrammer 全片擦除/写入/校验、串口证据、确定性协议测试和有限 Agent 修复回调。另有独立 BLE UUID 读写/通知测试，提供 Fake 离线闭环及 Bleak 适配器；真实 BLE 尚未实机验收。
+Windows/Python 本地嵌入式工具，按 **`mcu` 烧录与复位、`serial` 串口收发、`ble` 蓝牙操作**三个模块使用。人或 Agent 可以逐项调用，工具不会自行推进或重试。IAR/GCC 构建、BIN 导入与报告是辅助命令；旧测试套件和 `run` 保留兼容。
 
 **当前 APM32E030 显示板已完成单次全擦、写入校验和启动日志实测。** 这不是三平台或完整真实构建/协议闭环验收；三个目标 YAML 仍为阻塞模板。当前支持矩阵和实机证据只在 [验收记录](docs/VALIDATION.md) 维护。
 
@@ -13,7 +13,9 @@ Python 3.11+。本机没有 `python3` 命令，使用已安装的 `python`：
 ```powershell
 python -m pip install -e .
 embedded-auto --help
-embedded-auto run --target stm32f030 --suite example_protocol --dry-run --json
+embedded-auto mcu --help
+embedded-auto serial --help
+embedded-auto device check --target stm32f030 --json
 ```
 
 BLE 示例配置与套件可直接离线运行，不需要 MCU target，也不要求安装 Bleak：
@@ -25,7 +27,7 @@ embedded-auto ble test --config configs/ble/demo.yaml --suite configs/ble/suites
 
 这里的写入仅作用于本次新建的 Fake 外设状态；命令及套件使用见 [BLE 操作](docs/USER_GUIDE.md#ble-uuid-读写与通知)。真实后端需另装可选依赖 `embedded-auto[ble]`，锁定 `bleak==3.0.2`；不得由缺依赖自动回退 Fake。
 
-dry-run 不构建、不打开串口、不操作目标；返回成功仅指计划生成，继续检查 `data.ready_for_execution` 和 `blocking_issues`。真实操作前按 [使用指南](docs/USER_GUIDE.md) 核对工程、布局、电气与授权，先只连接再烧录。
+`mcu preflight` 可离线核对具体 BIN 和擦除范围，不授予授权；区别于只检查计划的 `--dry-run`。真实操作前按[使用指南](docs/USER_GUIDE.md)核对布局、电气和授权。
 
 **烧录需逐次提供绑定镜像和全片范围的授权；全片擦除会清除参数/KV/Bootloader，不自动备份恢复。** 外部 BIN 导入及完整门槛见 [烧录与启动](docs/USER_GUIDE.md#烧录与启动)。
 

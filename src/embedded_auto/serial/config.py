@@ -14,8 +14,11 @@ def validate_serial_config(config):
     number(s.get("read_timeout_s", 0.1), "serial.read_timeout_s", 0.001, 1)
     number(s.get("write_timeout_s", 1), "serial.write_timeout_s", 0.001, 60)
     try:
-        codecs.lookup(s.get("encoding", "utf-8"))
-    except (LookupError, TypeError) as exc:
+        encoding = s.get("encoding", "utf-8")
+        # 查到的编解码器可能是 base64 等非文本变换；预检两种实际使用的解码方式。
+        b"A".decode(encoding, "replace")
+        codecs.getincrementaldecoder(encoding)(errors="replace")
+    except (LookupError, TypeError, ValueError) as exc:
         raise ToolError("CONFIG_INVALID", "serial.encoding 不是有效文本编码") from exc
     if s.get("rtscts", False) is not False or s.get("dsrdtr", False) is not False:
         raise ToolError("CONFIG_INVALID", "RTS 复位模式禁止硬件流控")

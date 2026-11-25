@@ -4,7 +4,7 @@
 
 ## 命令与返回
 
-原有固件/串口命令支持 `--config`（默认 `configs/app.yaml`）、`--target`、`--json`、`--timeout`（整个操作秒数）、`--dry-run`、`--verbose`、`--port`、`--baudrate`；公共选项可放在子命令前后。`--config` 指全局 YAML，目标从同目录 `targets/<target>.yaml` 加载。`report` 不需要 target。BLE 使用独立子命令及公共选项，不接受也不构造 MCU target。
+默认按 `mcu`、`serial`、`ble` 逐项操作，命令返回后不自动进入下一步。固件/串口命令支持 `--config`（默认 `configs/app.yaml`）、`--target`、`--json`、`--timeout`（总操作秒数）、`--dry-run`、`--verbose`、`--port`、`--baudrate`；公共选项可放在子命令前后。`--config` 指全局 YAML，目标从同目录 `targets/<target>.yaml` 加载。`report` 不需要 target；BLE 使用独立配置，不接受 MCU target。
 
 | 命令 | 行为 | 额外参数 |
 | --- | --- | --- |
@@ -12,22 +12,41 @@
 | `build` | 构建，归档 BIN 快照和身份清单 | `--backend iar/gcc` 可选 |
 | `artifact import` | 非破坏性导入外部 BIN 快照 | `--file`、`--address`、`--source` 必需 |
 | `stability evaluate` | 离线检查重复运行记录，不操作硬件 | `--records` 指向 JSON 数组 |
-| `connect` | 仅复位辅助连接，不擦除、不写入 | 无 |
-| `flash` | 校验已有产物，全擦、写入、校验、脉冲复位 | `--artifact` 必需；真实执行须 `--erase-authorization` |
-| `reset` | 普通脉冲复位 | 无 |
-| `monitor` | 定时采集串口证据，不主动发送数据 | `--duration` 默认 30 秒 |
-| `test` | 对当前固件发送并断言协议响应 | `--suite` 必需 |
-| `run` | 构建、全擦/写入/校验、复位、等待启动、协议测试 | `--suite` 必需；真实执行须 `--erase-authorization` |
+| `mcu preflight` | 离线检查具体 BIN 与擦除范围，不连接或授权 | `--artifact` 必需；`--manifest` 可选 |
+| `mcu connect`（旧 `connect`） | 复位辅助连接，可能打断固件；不擦除、不写入 | 无 |
+| `mcu program`（旧 `flash`） | 核对已有快照，全擦、写入、校验并复位；不构建、不测试 | `--artifact` 必需；执行须 `--erase-authorization` |
+| `mcu reset`（旧 `reset`） | 单次 RTS 脉冲复位，不擦除、不写入 | 无 |
+| `serial read` | 限时接收，返回字节计数和有界预览，不发送 | `--duration` 默认 2 秒 |
+| `serial send` | 发送一次，可在同一会话监听，不重发 | `--text` 或 `--hex` 二选一，`--listen-after` 默认 0 秒 |
+| `serial capture`（旧 `monitor` 保留） | 定时采集完整串口证据，不发送 | `--duration` 默认 30 秒 |
+| `test` | 可选兼容套件：对当前固件发送并断言响应 | `--suite` 必需 |
+| `run` | 兼容编排：构建、全擦/写入/校验、复位、等启动、测试 | `--suite` 必需；执行须 `--erase-authorization` |
 | `report` | 读取历史结果，不操作硬件 | `--run-id` 必需 |
 
 ```powershell
 embedded-auto device check --target stm32f030 --json
-embedded-auto run --target stm32f030 --suite example_protocol --dry-run --json
+embedded-auto serial send --target stm32f030 --hex "50 49 4E 47 0A" --listen-after 0.5 --dry-run --json
 ```
 
 `--dry-run` 保存计划，不编译、不打开串口、不连接、不擦除。退出成功只证明计划生成；必须查看 `data.ready_for_execution`、`blocking_issues`，也不能据此证明实物或产物可用。`device check` 检查 `flash/run` 的静态擦除范围和保留区，不要求或验证逐次授权，也不代替硬件验收。
 
 退出码 0 为命令定义下成功，1 为操作失败，2 为参数语法错误。JSON 最终字段为 `success/operation/error_code/message/duration_ms/run_id/log_path/data`；服务详细结果位于 `data`，总目录为 `data.run_path`。`report` 返回原结果和原成功状态，不重新验证。模型摘要、终端 PASS 不能替代这些字段和原始证据。
+
+### MCU 离线预检
+
+`mcu` 单步入口不需要构建和启动配置；`mcu reset` 也不需要 `flash` 配置。旧命令保留原配置格式。
+
+`embedded-auto mcu preflight --target stm32f030 --artifact <快照.bin> --json` 会读取 BIN 和 `artifact_manifest.json`（或 `--manifest` 指定的清单），校验具体大小、SHA-256、身份和写入区域，还会检查静态全擦范围、保留区、声明的工具配置及可执行路径。它不启动烧录器、不核验实物身份或本次工具版本。失败返回分项 `blocking_issues`；成功只表示 `offline_checks_passed`，`authorization_granted` 始终为 `false`。带 `--dry-run` 仍做同一离线检查，不退化成模板计划。使用裸 BIN 时先离线 `artifact import`。
+
+当前不开放独立 `mcu erase/write/verify`：尚未验收独立写入的实际擦除影响和单独校验。不要把 `mcu program` 当成只写入；全片擦除会清除内部 Flash 中的参数、KV 和 Bootloader。
+
+### 串口单步操作
+
+- `serial` 子命令仍用 `--target` 选择具名配置，但只需要 `app`、`target.id`、`serial`、`reset`，不用填构建、烧录或启动配置。RTS 极性、电压、接线及打开瞬态的核验要求不变；虽然命令不主动脉冲复位，开关 COM 仍可能影响物理 RTS/NRST。
+- `send` 的 `--text` 固定 UTF-8，不自动追加换行；`--hex` 可包含空格，一次发送 1–4096 字节。`--listen-after` 大于 0 时，先为同一会话记录接收起点、再发送、最后监听指定时间。窗口内数据可能包含主动上报，不能自动判定是回复；`WRITE_COMPLETED` 只表示本机写调用完成。
+- `read` 和带监听的 `send` 返回起止字节偏移、接收量和最多 256 字节的 hex/文本预览。无接收不是失败；要验证协议响应请使用显式套件。`capture` 主要用于取日志路径，不返回文本预览。三者归档 `serial.bin`、`serial.jsonl` 和 `serial.log`，预览不截断原始证据。接收快照结束到关闭之间可能还有字节，以原始日志为准。
+- 每次调用结束后释放端口，不留后台会话；端口占用时不抢占。不要把 `send` 和另一次 `read` 当作可靠的即时请求/回复组合。复位仍由 `mcu reset` 执行，两条命令不能并发独占同一 COM。
+- `--timeout` 是总预算，必须大于接收窗口；发送还需预留 `serial.write_timeout_s`。预算不足会在打开 COM 前拒绝；若打开后剩余预算不足，也不会发送。
 
 ## BLE UUID 读写与通知
 
@@ -103,12 +122,12 @@ IAR 配置使用 `backend: iar`、实际 `executable`、`project_file` 和 `conf
 先完成相关安全配置，再按需运行；这些是实机操作示例，不应自动执行：
 
 ```powershell
-embedded-auto monitor --target apm32e030 --port COM7 --baudrate 9600 --duration 15 --json
-embedded-auto connect --target apm32e030 --json
-embedded-auto reset --target apm32e030 --json
+embedded-auto serial capture --target apm32e030 --port COM7 --baudrate 9600 --duration 15 --json
+embedded-auto mcu connect --target apm32e030 --json
+embedded-auto mcu reset --target apm32e030 --json
 ```
 
-`connect` 要求明确料号、CLI 核验和连接成功正则；此时 `timing_verified/compatibility_verified` 可仍为 false，目标可仍为 template。选择一次候选释放延迟，记录每次结果，再决定下一次操作；不用 GUI 卡顿作同步信号，不自动无限尝试，不自动改成 Under Reset/HWrst。
+`mcu connect` 要求明确料号、CLI 核验和连接成功正则；此时 `timing_verified/compatibility_verified` 可仍为 false，目标可仍为 template。选择一次候选释放延迟，记录每次结果，再决定下一次操作；不用 GUI 卡顿作同步信号，不自动无限尝试，不自动改成 Under Reset/HWrst。
 
 `pulse_ms` 是普通复位宽度；`release_delay_ms` 仅用于启动 CLI 后释放复位；可选 `post_pulse_delay_ms` 默认为 0，是普通复位后的独立等待。不要混为一个时序。
 
@@ -120,19 +139,19 @@ embedded-auto reset --target apm32e030 --json
 
 **全片擦除会清除整个内部 Flash，包括 Bootloader、KV、校准、配对参数，即使不在 BIN 覆盖区域内。正式流程不自动备份/恢复。** 执行前确认目标、授权范围和需保留内容；不要把实机校准脚本的额外备份/读回当成正式 CLI 的内建功能。
 
-`flash` 仅接受带 `artifact_manifest.json` 的构建或导入快照，不能直接传裸 BIN，也没有忽略身份/哈希/校验的开关。清单不是数字签名，必须来自受信本地目录。导入不执行构建或硬件操作：
+`mcu program` 仅接受带 `artifact_manifest.json` 的构建或导入快照，不能直接传裸 BIN，也没有忽略身份/哈希/校验的开关。清单不是数字签名，必须来自受信本地目录。构建和导入是二选一的产物来源，都不操作硬件：
 
 ```powershell
 embedded-auto build --target apm32e030 --backend gcc --json
 embedded-auto artifact import --target apm32e030 --file "<本地固件>.bin" --address 0x08000000 --source "人工确认的来源说明" --json
-embedded-auto flash --target apm32e030 --artifact "runs/<run_id>/firmware.bin" --dry-run --json
+embedded-auto mcu preflight --target apm32e030 --artifact "runs/<run_id>/firmware.bin" --json
 ```
 
 导入要求 `target.status: verified`、完整料号、确认的写入区域、`flash.ram_start/ram_size/ram_source`，只支持从 `0x08000000` 启动；检查初始栈指针和 Thumb 复位向量，但不能认证固件来源或兼容性。`integrity_verified` 与 `device_compatibility_verified` 含义不同；源文件后续修改不改变快照，烧录前重新核对快照、清单及同目录 `artifact_manifest.sha256`。清单、摘要和文件可被同一写权限主体共同篡改，因此不是防恶意修改的签名。
 
 真实擦除必须配置 `flash.erase_policy: mass_erase`、完整芯片内部 Flash 的 `physical_flash_start/physical_flash_size/physical_flash_source`；非空 `preserve_regions` 与全擦冲突，直接拒绝。范围擦除和免擦模式均未核验，拒绝执行，绝不退回全擦。区域声明本身不能保护任何数据；本轮没有备份恢复、Option Bytes、RDP 或 OTP 操作。
 
-每次真实 `flash` 或 `run` 还须通过 `--erase-authorization` 单独提供 JSON 对象，键必须恰为 `target_id`、`exact_part_number`、`sha256`、`address`、`erase_policy`、`erase_start`、`erase_size`；`address/erase_start/erase_size` 使用 JSON 整数（十进制），`erase_policy` 为字符串 `mass_erase`。内容须精确匹配当前目标、快照 SHA-256、写入地址与上述完整物理全片起点和大小。不能从目标 YAML、环境变量或通用确认开关继承授权。`run` 构建后的哈希必须与本次明确提供的值一致；未知时先构建、检查快照，再评估单独 flash。未提供授权的旧命令现在安全拒绝；dry-run 只提供计划并列出阻断项。
+每次真实 `mcu program`（含旧 `flash`）或 `run` 还须通过 `--erase-authorization` 单独提供 JSON 对象，键必须恰为 `target_id`、`exact_part_number`、`sha256`、`address`、`erase_policy`、`erase_start`、`erase_size`；`address/erase_start/erase_size` 使用 JSON 整数（十进制），`erase_policy` 为字符串 `mass_erase`。内容须精确匹配当前目标、快照 SHA-256、写入地址与上述完整物理全片起点和大小。不能从目标 YAML、环境变量或通用确认开关继承授权。`run` 构建后的哈希必须与本次明确提供的值一致；未知时先构建，再用 `mcu preflight` 检查快照。未提供授权时拒绝执行；`mcu program --dry-run` 只提供计划并列出阻断项。
 
 默认读取 BIN 同目录清单；真实写入还要求 CLI 版本声明与所需版本一致、`target.status: verified`、CLI/兼容性/时序核验及真实成功正则。软件只检查声明，不运行工具查询实际版本，也不证明串口空闲、设备身份或复位物理状态。进入擦除前先完成全部产物和配置预检。
 
@@ -146,7 +165,7 @@ CLI -c port=SWD mode=NORMAL reset=SWrst -w firmware.bin 0x08000000 -v
 
 `flash.erase_success_pattern` 必须来自本机实际输出，不用总能匹配的宽泛正则；当前已实测文本与工具版本在 [验收记录](VALIDATION.md)。擦除证据见 `erase.log` 和 `flash_result.json` 的 `data.erase`；dry-run 显示顺序、命令及破坏性警告。
 
-`flash` 在校验后脉冲复位，不等待启动标志或执行协议测试；`run` 还根据 `startup.ready_pattern` 等待新固件启动，超时为 `startup.timeout_s`，使用 `serial.encoding` 解码；病态启动正则在独立工作进程中执行，受启动超时与总截止时间约束。标志为空时只等 `settle_delay_s` 并明确标记弱判断，不声称检测到了启动。
+`mcu program` 在校验后脉冲复位，不等待启动标志或执行协议测试；`run` 还根据 `startup.ready_pattern` 等待新固件启动，超时为 `startup.timeout_s`，使用 `serial.encoding` 解码；病态启动正则在独立工作进程中执行，受启动超时与总截止时间约束。标志为空时只等 `settle_delay_s` 并明确标记弱判断，不声称检测到了启动。
 
 `stability evaluate --records <记录.json> --json` 仅检查恰好 20 条记录：每条含唯一 `run_id`、`target_id/device_id/sha256`、整数 `erase_start/erase_size/duration_ms` 和布尔 `success/verified/boot_confirmed/cleanup_succeeded`；设备、镜像和范围须一致，首次失败后不得继续。即使记录格式通过，`hardware_stability_verified` 仍为 false；该命令不会执行重复测试或认证人工填写的事实。
 
@@ -176,14 +195,13 @@ UTF-8 文本正则匹配字节流，跨行需显式 `(?s)`；协议正则工作�
 
 ## Agent 调用
 
-可执行命令的 Agent 直接用 CLI，无专有 SDK。`describe_contract()` 在 [agent/contract.py](../src/embedded_auto/agent/contract.py) 提供结果 schema、错误码及逻辑工具映射：`inspect_target/build_firmware/flash_firmware/reset_target/capture_serial/run_protocol_tests/get_run_report/run_workflow`。
+Agent 直接调用 CLI 并读取 `--json`，不需要 MCP 或后台服务。[`describe_contract()`](../src/embedded_auto/agent/contract.py) 的 v2 契约提供 `tool_groups`（三个硬件模块）、`tools`（含辅助命令）、`tool_effects`（硬件副作用）和 `optional_tools`（`test`、`ble test`、`run`）。默认工具不包含一键编排。
 
-1. 明确目标板、工程、允许动作和最大修复次数；源码修改与硬件动作分别授权。
-2. 保存 Git 状态和本轮补丁。工具不创建分支、不 commit/push、不调用外部模型。
-3. 运行获准命令并读取 JSON 和原始证据；工具/硬件错误先停止，不能当作固件 Bug 盲目改代码。
-4. 成功停止；默认最多修复 3 轮，即初次验证加最多 3 次修复后的验证，不删除失败记录或静默修改断言。
+1. 确认目标和本次允许的动作；用户只要求预检时，不继续连接或烧录。
+2. 只执行获准命令，报告 JSON 结果、证据与清理状态后停止；不自动重试或改变断言。
+3. 擦除授权由人或可信宿主明确授予。CLI 校验授权字段绑定，不能鉴别 JSON 是谁提供的；Agent 不得把预检数据自行回填成授权。真实串口发送、BLE 写入也须是用户明确要求的动作。
 
-Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute, repair, ctx)`：
+旧有限修复回调仅供可信宿主显式使用，不是默认流程。Python 接口为 `RepairLoop(policy, protected_paths=[...]).run(target, execute, repair, ctx)`：
 
 - `RepairPolicy(allowed_targets=('stm32f030',), max_repairs=3)` 为不可变策略，修复次数仅接受有限 0..100。
 - `execute()` 返回 `OperationResult`；`repair(round_number, previous_result)` 由可信宿主在授权范围修改源码；`ctx` 为运行上下文。

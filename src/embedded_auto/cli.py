@@ -28,7 +28,7 @@ def common(parser):
 
 
 def parser():
-    root = argparse.ArgumentParser(prog="embedded-auto", description="本地嵌入式自动化：构建、复位、烧录和确定性测试")
+    root = argparse.ArgumentParser(prog="embedded-auto", description="本地嵌入式工具：MCU 烧录与复位、串口收发、BLE")
     root.add_argument("--version", action="version", version=__version__)
     common(root)
     commands = root.add_subparsers(dest="command", required=True)
@@ -50,6 +50,34 @@ def parser():
     evaluation = stability_commands.add_parser("evaluate")
     common(evaluation)
     evaluation.add_argument("--records", required=True, help="人工整理的 JSON 记录数组")
+    mcu = commands.add_parser("mcu", help="STM32/APM32 烧录与复位")
+    common(mcu)
+    mcu_commands = mcu.add_subparsers(dest="mcu_command", required=True)
+    for name, description in (
+        ("preflight", "离线核对具体 BIN 与全片擦除范围，不授予授权"),
+        ("connect", "复位辅助连接；可能打断固件运行，不擦除、不写入"),
+        ("reset", "发送一次 RTS 复位脉冲，不擦除、不写入"),
+        ("program", "全片擦除、写入、校验并复位；须单独授权"),
+    ):
+        sub = mcu_commands.add_parser(name, help=description, description=description)
+        common(sub)
+        if name in ("preflight", "program"):
+            artifact_options(sub)
+        if name == "program":
+            authorization_option(sub)
+    serial = commands.add_parser("serial", help="串口读取、发送和限时日志采集")
+    common(serial)
+    serial_commands = serial.add_subparsers(dest="serial_command", required=True)
+    for name in ("read", "send", "capture"):
+        sub = serial_commands.add_parser(name)
+        common(sub)
+        if name == "send":
+            payload = sub.add_mutually_exclusive_group(required=True)
+            payload.add_argument("--text", dest="send_text", help="UTF-8 文本，不自动添加换行")
+            payload.add_argument("--hex", dest="send_hex", help="十六进制字节，可用空格分隔")
+            sub.add_argument("--listen-after", type=float, default=0, help="同一串口内发送后监听的秒数")
+        else:
+            sub.add_argument("--duration", type=float, default=2 if name == "read" else 30, help="采集秒数")
     ble = commands.add_parser("ble", help="BLE UUID 读写/通知验证；默认使用显式配置的后端")
     ble_common(ble)
     ble_commands = ble.add_subparsers(dest="ble_command", required=True)
@@ -75,15 +103,16 @@ def parser():
         if name == "test":
             sub.add_argument("--suite", required=True, help="显式 YAML 文件路径（相对当前调用目录）")
     for name in ("build", "flash", "connect", "reset", "monitor", "test", "run", "report"):
-        sub = commands.add_parser(name)
+        help_text = {"run": "兼容：完整构建、烧录及测试流程", "test": "可选串口协议套件",
+                     "flash": "兼容：等同 mcu program"}.get(name)
+        sub = commands.add_parser(name, help=help_text)
         common(sub)
         if name in ("build", "run"):
             sub.add_argument("--backend", choices=("iar", "gcc"))
         if name == "flash":
-            sub.add_argument("--artifact", required=True, help="带构建身份清单的 BIN 快照")
-            sub.add_argument("--manifest", help="默认读取 BIN 同目录的 artifact_manifest.json")
+            artifact_options(sub)
         if name in ("flash", "run"):
-            sub.add_argument("--erase-authorization", help="本次目标、SHA-256、地址及全片范围的 JSON 授权对象")
+            authorization_option(sub)
         if name in ("run", "test"):
             sub.add_argument("--suite", required=True, help="测试套件 ID 或 YAML 路径")
         if name == "monitor":
@@ -91,6 +120,15 @@ def parser():
         if name == "report":
             sub.add_argument("--run-id", required=True)
     return root
+
+
+def artifact_options(parser):
+    parser.add_argument("--artifact", required=True, help="带构建或导入清单的 BIN 快照")
+    parser.add_argument("--manifest", help="默认读取 BIN 同目录的 artifact_manifest.json")
+
+
+def authorization_option(parser):
+    parser.add_argument("--erase-authorization", help="本次由人或可信宿主授予的全擦授权 JSON 对象")
 
 
 def ble_common(parser):
@@ -125,6 +163,10 @@ def main(argv=None):
         operation = "stability evaluate"
     if args.command == "ble":
         operation = f"ble {args.ble_command}"
+    elif args.command == "mcu":
+        operation = f"mcu {args.mcu_command}"
+    elif args.command == "serial":
+        operation = f"serial {args.serial_command}"
     config_path = Path(getattr(args, "config", "configs/app.yaml")).resolve()
     try:
         if operation == "report":
@@ -146,7 +188,7 @@ def main(argv=None):
             for key in ("port", "baudrate"):
                 if hasattr(args, key):
                     overrides.setdefault("serial", {})[key] = getattr(args, key)
-            config = load_config(config_path, target, overrides)
+            config = load_config(config_path, target, overrides, operation=operation)
             if operation == "artifact import":
                 if getattr(args, "dry_run", False):
                     raise ToolError("CONFIG_INVALID", "artifact import 不支持 --dry-run；不会创建快照")
@@ -163,7 +205,7 @@ def main(argv=None):
                     identifier(args.suite)
                     suite_path = config_path.parent / "test_suites" / f"{args.suite}.yaml"
                 suite = load_yaml(suite_path.resolve())
-            if hasattr(args, "duration"):
+            if operation == "monitor" and hasattr(args, "duration"):
                 number(args.duration, "duration", 0.001)
             if result is None:
                 from .application.workflow_engine import WorkflowEngine
@@ -177,7 +219,9 @@ def main(argv=None):
                     config, operation, suite=suite,
                     artifact=getattr(args, "artifact", None), manifest_path=getattr(args, "manifest", None),
                     duration=getattr(args, "duration", 30), timeout_s=getattr(args, "timeout", None),
-                    dry_run=getattr(args, "dry_run", False), authorization=authorization).to_dict()
+                    dry_run=getattr(args, "dry_run", False), authorization=authorization,
+                    send_text=getattr(args, "send_text", None), send_hex=getattr(args, "send_hex", None),
+                    listen_after=getattr(args, "listen_after", 0)).to_dict()
     except ToolError as exc:
         result = OperationResult(False, operation, exc.code, str(exc), data=exc.data).to_dict()
     except KeyboardInterrupt:

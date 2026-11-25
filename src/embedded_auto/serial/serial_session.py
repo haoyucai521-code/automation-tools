@@ -71,7 +71,7 @@ class SerialSession:
                 self._port.port = cfg['port']
                 self._port.open()
                 self._start_reader()
-            except Exception as exc:
+            except (Exception, KeyboardInterrupt) as exc:
                 failures = []
                 self._stop.set()
                 if self._port is not None:
@@ -94,6 +94,9 @@ class SerialSession:
                         failures.append(f'close failed: {close_exc}')
                 if self._port is None:
                     self._release_owner()
+                if isinstance(exc, KeyboardInterrupt):
+                    raise ToolError('CANCELLED', '串口打开期间被中断',
+                                    {'cleanup_error': '; '.join(failures) if failures else None}) from exc
                 raise ToolError('SERIAL_OPEN_FAILED', str(exc),
                                 {'cleanup_error': '; '.join(failures) if failures else None}) from exc
 
@@ -103,8 +106,9 @@ class SerialSession:
             self._thread = threading.Thread(target=self._receive, name=f'serial-{self._key}', daemon=True)
             try:
                 self._thread.start()
-            except Exception:
-                self._thread = None
+            except (Exception, KeyboardInterrupt):
+                if self._thread.ident is None:
+                    self._thread = None
                 raise
 
     def subscribe(self, callback):
@@ -139,7 +143,9 @@ class SerialSession:
     def _receive(self):
         try:
             while not self._stop.is_set():
-                data = self._port.read(4096)
+                # 只批量读已到达的字节；空闲时等首字节，不等短帧凑满或耗尽读超时。
+                pending = getattr(self._port, 'in_waiting', 4096)
+                data = self._port.read(max(1, min(4096, pending)))
                 if not data:
                     self._stop.wait(0.001)
                     continue

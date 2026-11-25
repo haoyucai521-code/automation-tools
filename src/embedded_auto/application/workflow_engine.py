@@ -1,15 +1,17 @@
 import copy
-import json
-import math
 import shutil
 import time
 from pathlib import Path
 
 from embedded_auto.core.config import number
 from .config import validate_config, validation_issues
+from .serial_actions import SERIAL_ACTIONS, check_serial_budget, perform_serial_action, serial_options
 from embedded_auto.core.errors import ToolError
 from embedded_auto.core.models import OperationResult
 from embedded_auto.core.run_context import RunContext, write_json
+
+
+MCU_OPERATIONS = {"mcu connect": "connect", "mcu reset": "reset", "mcu program": "flash"}
 
 
 class WorkflowEngine:
@@ -66,13 +68,16 @@ class WorkflowEngine:
             "connect": ["VALIDATE_CONFIG", "OPEN_SERIAL", "RESET_ASSISTED_CONNECT_ONLY"],
             "reset": ["VALIDATE_CONFIG", "OPEN_SERIAL", "PULSE_RESET"],
             "monitor": ["VALIDATE_CONFIG", "OPEN_SERIAL", "CAPTURE_SERIAL"],
+            "serial read": ["VALIDATE_CONFIG", "OPEN_SERIAL", "SERIAL_READ"],
+            "serial send": ["VALIDATE_CONFIG", "OPEN_SERIAL", "SERIAL_SEND"],
+            "serial capture": ["VALIDATE_CONFIG", "OPEN_SERIAL", "SERIAL_CAPTURE"],
             "test": ["VALIDATE_CONFIG", "OPEN_SERIAL", "RUN_TESTS"],
             "device check": ["INSPECT_CONFIG", "LIST_TOOLS_AND_PORTS_WITHOUT_OPENING"],
         }
         return OperationResult(True, operation, message="仅生成计划；未执行构建、串口或烧录", data={
             "dry_run": True, "ready_for_execution": not issues, "blocking_issues": issues,
             "steps": steps.get(operation, []) + ["CLEANUP", "ARCHIVE"],
-            "build": config["build"], "flash": config["flash"],
+            "build": config.get("build"), "flash": config.get("flash"),
             "reset": config["reset"], "serial": config["serial"], "suite": suite,
             "commands": commands,
             "destructive_warning": "全片擦除将清除整个内部 Flash，包括参数、KV 和 Bootloader" if operation in ("flash", "run") else None,
@@ -97,19 +102,38 @@ class WorkflowEngine:
                                "hardware_verified_by_this_check": False})
 
     def execute(self, config, operation, *, suite=None, artifact=None, manifest_path=None,
-                duration=30, timeout_s=None, dry_run=False, authorization=None):
-        if operation not in ("device check", "build", "flash", "connect", "reset", "monitor", "test", "run"):
+                duration=30, timeout_s=None, dry_run=False, authorization=None,
+                send_text=None, send_hex=None, listen_after=0):
+        requested_operation = operation
+        operation = MCU_OPERATIONS.get(operation, operation)
+        serial_action = operation in SERIAL_ACTIONS
+        if operation not in ("device check", "build", "flash", "connect", "reset", "monitor", "test", "run",
+                             "mcu preflight", *SERIAL_ACTIONS):
             raise ToolError("CONFIG_INVALID", f"不支持的操作: {operation}")
-        ctx = RunContext(config, operation, timeout_s,
-                         evidence_hint="原始串口数据（若打开串口）: serial.bin / serial.jsonl")
+        ctx = RunContext(config, requested_operation, timeout_s,
+                         evidence_hint=None if operation == "mcu preflight" else
+                         "原始串口数据（若打开串口）: serial.bin / serial.jsonl")
         session = reset = logger = None
         opened = False
         steps, cleanup = {}, []
         phase = "plan" if dry_run else "preflight"
         result = OperationResult(False, operation, "INTERNAL_ERROR", "操作未完成")
         try:
-            if dry_run:
+            if operation == "mcu preflight":
+                from .mcu_preflight import preflight
+                ctx.event("MCU_PREFLIGHT")
+                result = preflight(config, ctx, artifact, manifest_path)
+            elif dry_run:
                 result = self.plan(config, operation, suite)
+                if serial_action:
+                    try:
+                        window, payload = serial_options(operation, duration, send_text, send_hex, listen_after)
+                        result.data.update(window_s=window, tx_bytes_planned=len(payload) if payload else 0)
+                        if result.data["ready_for_execution"]:
+                            check_serial_budget(config, ctx, window, payload)
+                    except ToolError as exc:
+                        result.data["blocking_issues"].append(f"{exc.code}: {exc}")
+                        result.data["ready_for_execution"] = False
             elif operation == "device check":
                 result = self.inspect(config)
             else:
@@ -117,12 +141,15 @@ class WorkflowEngine:
                 validate_config(config, operation)
                 if operation == "monitor":
                     number(duration, "duration", 0.001)
+                if serial_action:
+                    window, payload = serial_options(operation, duration, send_text, send_hex, listen_after)
                 if operation in ("run", "test"):
                     from embedded_auto.serial.test_runner import validate_suite
                     validate_suite(suite)
                     write_json(ctx.path / "test_suite.json", suite)
                 ctx.check()
-                ctx.snapshot_git()
+                if not serial_action:
+                    ctx.snapshot_git()
                 if operation in ("build", "run"):
                     phase = "build"
                     ctx.event("BUILD")
@@ -135,17 +162,9 @@ class WorkflowEngine:
                 image, manifest = None, None
                 if operation in ("flash", "run"):
                     phase = "preflight"
-                    from embedded_auto.firmware.build_service import validate_artifact
+                    from .mcu_preflight import load_flash_artifact
                     ctx.event("VALIDATE_ARTIFACT")
-                    if artifact is None:
-                        raise ToolError("ARTIFACT_MISSING", "必须明确指定产物")
-                    image = Path(artifact).resolve()
-                    manifest_file = Path(manifest_path).resolve() if manifest_path else image.parent / "artifact_manifest.json"
-                    try:
-                        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-                    except (OSError, ValueError) as exc:
-                        raise ToolError("ARTIFACT_INVALID", f"缺少或无效的产物身份清单: {exc}") from exc
-                    steps["artifact"] = validate_artifact(image, manifest, config)
+                    image, manifest, steps["artifact"] = load_flash_artifact(config, artifact, manifest_path)
                     from embedded_auto.firmware.erase_policy import validate_erase_policy
                     steps["erase_authorization"] = validate_erase_policy(config, steps["artifact"], authorization)
                     write_json(ctx.path / "input_artifact_manifest.json", manifest)
@@ -153,18 +172,18 @@ class WorkflowEngine:
                     result = OperationResult(True, operation, message="构建成功，产物已独立归档", data=steps)
                 else:
                     if operation in ("connect", "flash", "run"):
-                        executable = config["flash"].get("executable")
-                        if not executable or not shutil.which(executable):
-                            raise ToolError("FLASH_TOOL_NOT_FOUND", "烧录工具路径不存在或不可执行")
-                        delay = config["reset"]["release_delay_ms"] / 1000
-                        timeout = config["flash"].get("timeout_s", 60)
-                        if not math.isfinite(delay) or delay >= min(timeout, ctx.remaining):
-                            raise ToolError("FLASH_CONFIG_INVALID", "复位释放延迟超出阶段或剩余总预算")
+                        from .mcu_preflight import check_programmer_ready
+                        check_programmer_ready(config, ctx.remaining)
+                    if serial_action:
+                        check_serial_budget(config, ctx, window, payload)
                     ctx.event("OPEN_SERIAL")
                     phase = "open_serial"
                     session = self.session_factory(config)
                     logger = self.log_factory(session, ctx, encoding=config["serial"].get("encoding", "utf-8"))
                     logger.start()
+                    if serial_action:
+                        # 日志初始化可能耗尽总预算，不在预算不足时再触碰 COM。
+                        check_serial_budget(config, ctx, window, payload)
                     session.open()
                     opened = True
                     # 复位控制器构造不触碰硬件，尽早创建，使 check 失败也走 release_reset 清理。
@@ -235,6 +254,10 @@ class WorkflowEngine:
                     if operation == "monitor":
                         ctx.event("CAPTURE_SERIAL", duration_s=duration)
                         ctx.sleep(duration)
+                    if serial_action:
+                        phase = operation.replace(" ", "_")
+                        perform_serial_action(config, ctx, session, operation, window, payload, steps)
+                        ctx.check()
                     session.check()
                     result = OperationResult(True, operation, message="操作完成，证据已归档", data=steps)
                     phase = "complete"
@@ -292,7 +315,7 @@ class WorkflowEngine:
                 "plan_only": dry_run}
             if any(not action["success"] for action in cleanup) and result.success:
                 result.success, result.error_code, result.message = False, "CLEANUP_FAILED", "操作成功但清理失败；硬件状态可能不确定"
-            if logger is not None and (ctx.path / "serial.log").exists():
+            if not serial_action and logger is not None and (ctx.path / "serial.log").exists():
                 from embedded_auto.serial.log_analyzer import LogAnalyzer
                 try:
                     analysis = LogAnalyzer.analyze(ctx.path / "serial.log")
@@ -300,6 +323,7 @@ class WorkflowEngine:
                     result.data["log_analysis"] = analysis
                 except Exception as exc:
                     result.data["log_analysis_error"] = str(exc)
+        result.operation = requested_operation
         try:
             return ctx.finish(result)
         except (OSError, ValueError, TypeError) as exc:

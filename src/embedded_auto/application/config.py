@@ -9,8 +9,10 @@ from embedded_auto.firmware.config import validate_build_config, validate_layout
 from embedded_auto.firmware.erase_policy import validate_erase_scope
 from embedded_auto.serial.config import validate_serial_config
 
+from .serial_actions import SERIAL_ACTIONS
 
-def load_config(path: str | Path, target: str, overrides: dict | None = None) -> dict:
+
+def load_config(path: str | Path, target: str, overrides: dict | None = None, *, operation: str | None = None) -> dict:
     path = Path(path).resolve()
     identifier(target)
     app = load_yaml(path)
@@ -18,20 +20,33 @@ def load_config(path: str | Path, target: str, overrides: dict | None = None) ->
     config = merge(app, load_yaml(target_path))
     if overrides:
         config = merge(config, overrides)
-    for section in ("app", "target", "build", "flash", "reset", "startup", "serial"):
+    sections = ("app", "target", "reset", "serial")
+    if operation in ("mcu preflight", "mcu connect", "mcu program"):
+        sections += ("flash",)
+    elif operation not in ("mcu reset", *SERIAL_ACTIONS):
+        sections = ("app", "target", "build", "flash", "reset", "startup", "serial")
+    for section in sections:
         if not isinstance(config.get(section), dict):
             raise ToolError("CONFIG_INVALID", f"缺少或无效的配置节: {section}")
+    if "build" not in sections:
+        # 单步操作不用工程路径或启动判定；审计快照回退到 app.workspace。
+        for section in ("build", "flash", "startup"):
+            if section not in sections:
+                config.pop(section, None)
     if config["target"].get("id") != target:
         raise ToolError("CONFIG_INVALID", "配置文件与 target.id 不一致")
     root = resolve_path(config["app"].get("workspace", ".."), path.parent)
     config["app"]["workspace"] = str(root)
     config["app"]["runs_dir"] = str(resolve_path(config["app"].get("runs_dir", "runs"), root))
-    build = config["build"]
-    build["cwd"] = str(resolve_path(build.get("cwd", "."), root))
-    for key in ("project_file", "artifact"):
-        if build.get(key):
-            build[key] = str(resolve_path(build[key], Path(build["cwd"])))
+    if "build" in sections:
+        build = config["build"]
+        build["cwd"] = str(resolve_path(build.get("cwd", "."), root))
+        for key in ("project_file", "artifact"):
+            if build.get(key):
+                build[key] = str(resolve_path(build[key], Path(build["cwd"])))
     for section in ("build", "flash"):
+        if section not in sections:
+            continue
         exe = config[section].get("executable")
         if isinstance(exe, str) and ("/" in exe or "\\" in exe):
             config[section]["executable"] = str(resolve_path(exe, root))
@@ -46,7 +61,7 @@ def validate_config(config: dict, operation: str) -> None:
     number(app.get("default_timeout_s", 60), "app.default_timeout_s", 0.001)
     build_needed = operation in ("build", "run")
     flash_needed = operation in ("flash", "run")
-    serial_needed = operation in ("monitor", "reset", "connect", "flash", "test", "run")
+    serial_needed = operation in ("monitor", "reset", "connect", "flash", "test", "run", *SERIAL_ACTIONS)
     if build_needed:
         validate_build_config(config)
     if serial_needed:
